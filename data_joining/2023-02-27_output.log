@@ -1,0 +1,77 @@
+
+
+*** Run Information ***
+
+
+User: kieranf
+Date: 2023-02-27 19:59:53
+Working directory: /proj/characklab/flooddata/NC/data_joining
+Output directory: /proj/characklab/flooddata/NC/data_joining/2023-02-27_joined_data
+Parcels data source: /proj/characklab/flooddata/NC/NC_statewide_buildings_parcels/NC_parcels_all.gdb
+Buildings data source: /proj/characklab/flooddata/NC/NC_statewide_buildings_parcels/NC_Buildings_p.gdb
+Claims data source: /proj/characklab/flooddata/NC/geocoding/geocoded_datasets/NFIP_claim_data_geocoded_merged.txt
+Policies data source: /proj/characklab/flooddata/NC/geocoding/geocoded_datasets/NFIP_policy_data_geocoded_merged.txt
+
+
+*** Read and Reproject Data ***
+
+
+Target coordinate reference system: EPSG:32617
+Time elapsed: 2:22:28
+Cumulative time elapsed: 2:22:28
+
+
+*** Buildings to Parcels ***
+
+
+Matched 5203436 / 5211588 (99.84%) of buildings to a parcel.
+Time elapsed: 0:23:42
+Cumulative time elapsed: 2:46:10
+
+
+*** Claims to Buildings ***
+
+
+68248 / 98516 (69.28%) of points land on a building.
+7718 / 98516 (7.83%) of points are within 30 distance units of a building.
+398 / 98516 (0.4%) of points were indirectly matched to buildings via parcels.
+Of matched buildings, 22081 / 39248 (56.26%) have exactly one point.
+Final dataset consists of 76364 claims (77.51% of original dataset.)
+Time elapsed: 0:00:22
+Cumulative time elapsed: 2:46:33
+
+
+*** Policies to Buildings ***
+
+
+1016515 / 1130840 (89.89%) of policies were geolocated to a specific building in google maps api.
+853518 / 1016515 (83.97%) of points land on a building.
+102100 / 1016515 (10.04%) of points are within 30 distance units of a building.
+4158 / 1016515 (0.41%) of points were indirectly matched to buildings via parcels.
+Of matched buildings, 14739 / 125656 (11.73%) have exactly one point.
+Final dataset consists of 959776 policies (84.87% of original dataset.)
+Time elapsed: 0:00:43
+Cumulative time elapsed: 2:47:16
+
+
+*** Claims to Policies ***
+
+
+51618 / 76364 (67.59%) of claims match to one or more policies.
+Of matched claims, 46325 / 51618 (89.75%) match to exactly one policy.
+ 
+48492 / 959776 (5.05%) of policies match to one or more claims.
+Of matched policies, 41115 / 48492 (84.79%) match to exactly one claim.
+ 
+Among rooftop-matched claims linked to exactly one policy, 42524 / 46328 (91.79%) have the same google-formatted address as the policy.
+Time elapsed: 0:00:05
+Cumulative time elapsed: 2:47:22
+
+
+*** Write Output ***
+
+
+warning: multiple geometry types in geodataframe
+upcasting polygons to multipolygons to achieve consistency
+Time elapsed: 1:27:13
+Cumulative time elapsed: 4:14:36
