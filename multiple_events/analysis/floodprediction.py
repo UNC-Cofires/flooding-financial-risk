@@ -2,18 +2,19 @@ import pandas as pd
 import numpy as np
 import geopandas as gpd
 import datetime as dt
+import sklearn.metrics as metrics
 from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import KFold
 
 # *** Class for performing Random Forest regression on arbitrary data ***
 
-# Class for performing regression
 class RegressionObject:
 
     def __init__(self,train_df,test_df,target_df,response_variable,features):
         """
         param: train_df: pandas dataframe of training data (m x n+1)
         param: test_df: pandas dataframe of validation data (m x n+1)
-        param: target_df: pandas dataframe of target data (m x n)
+        param: target_df: pandas dataframe of target data (z x n)
         param: response_variable: name of response variable
         param: features: list of predictors
         """
@@ -47,10 +48,17 @@ class RegressionObject:
         param: x: testing data
         returns: y_pred: predicted value of response variable
         """
-
         y_pred = self.model.predict(x)
-
         return(y_pred)
+
+    def model_classify(self,x,threshold):
+        """
+        param: x: testing data
+        param: threshold: assign 1 if Pr(y=1 | x) > threshold
+        """
+        y_pred = self.model_predict(x)
+        y_class = (y_pred > threshold).astype(int)
+        return(y_class)
 
     def update_test_data(self,test_df):
         """
@@ -61,31 +69,143 @@ class RegressionObject:
 
         return(None)
 
-    def partial_residual_plots(self):
-        """
-        Create partial residual plots for model predictions. Useful for checking for systemic error.
-        """
-        y_pred = self.model_predict(self.x_test)
-        y_res = self.y_test - y_pred
+# Helper function to compute elements of confusion matrix
+# as well as optimal probability threshold for classification
 
-        for i in range(len(self.features)):
-            title = self.features[i]
-            x = self.x_test[:,i]
-            xmin = np.quantile(x,0.01)
-            xmax = np.quantile(x,0.99)
-            xpad = (xmax - xmin)*0.05
-            ymin = np.quantile(y_res,0.01)
-            ymax = np.quantile(y_res,0.99)
-            ypad = (ymax - ymin)*0.05
-            plt.figure()
-            plt.scatter(x,y_res,alpha=0.5,s=1.5)
-            plt.plot([xmin-xpad,xmax+xpad],[0,0],ls='--',c='k',alpha=0.5)
-            plt.xlim([xmin-xpad,xmax+xpad])
-            plt.ylim([ymin-ypad,ymax+ypad])
-            plt.title(title)
-            plt.show()
+def confusion_matrix(y_pred,y_true,threshold):
+    """
+    Compute the elements of the confusion matrix as well as
+    sensitivity, specificity, and precision.
 
-        return(None)
+    param: y_pred: numpy array of predicted class probabilities
+    param: y_true: numpy array of true class labels
+    param: threshold: threshold (cut-point) probability for classification
+    """
+    y_class = (y_pred > threshold).astype(int)
+
+    TN, FP, FN, TP = metrics.confusion_matrix(y_true, y_class).ravel()
+
+    P = TP + FN
+    N = TN + FP
+
+    TPR = TP/P
+    TNR = TN/N
+    PPV = TP/(TP + FP)
+
+    # Return result as dictionary
+    d = {'TP':TP,'FP':FP,'TN':TN,'FN':FN,'TPR':TPR,'TNR':TNR,'PPV':PPV}
+    return(d)
+
+def minimized_difference_threshold(y_pred,y_true):
+    """
+    Calculate the optimal threshold (cut-point) for classificatin based on
+    the minimized difference criterion defined by Jimenez-Valverde et al.
+    (doi:10.1016/j.actao.2007.02.001)
+
+    param: y_pred: numpy array of predicted class probabilities
+    param: y_true: numpy array of true class labels
+    """
+    TPR = np.vectorize(lambda x: confusion_matrix(y_pred,y_true,x)['TPR'])
+    TNR = np.vectorize(lambda x: confusion_matrix(y_pred,y_true,x)['TNR'])
+    abs_diff = lambda x: np.abs(TPR(x) - TNR(x))
+    threshold = y_pred[np.argmin(abs_diff(y_pred))]
+
+    return(threshold)
+
+# Class for performing K-fold validation
+
+class ValidationObject:
+
+    def __init__(self,data,response_variable,features,k=5,sample_weights=None):
+
+        """
+        param: data: pandas dataframe of training data (m x n+1)
+        param: response_variable: name of response variable
+        param: features: list of predictors
+        param: k: number of k-fold cross validation iterations to perform
+        param: sample_weights: numpy array of weights for calculation of weighted performance metrics
+        """
+        self.data = data
+        self.features = [f for f in features if f != response_variable and f != data.index.name]
+        self.response_variable = response_variable
+        self.k = k
+        self.kf = KFold(n_splits=self.k,random_state=None,shuffle=True)
+        self.sample_weights = sample_weights
+
+        self.ROC_curve = None
+        self.PR_curve = None
+
+    def cross_validate(self):
+        """
+        Perform k-fold cross validation
+        """
+
+        results_list = []
+
+        # Split in to k test/train folds
+        for k,(train_indices,test_indices) in enumerate(self.kf.split(self.data)):
+
+            results_dict = {'fold':k}
+
+            train_df = self.data.iloc[train_indices].copy()
+            test_df = self.data.iloc[test_indices].copy()
+
+            # Fit model
+            mod = RegressionObject(train_df,test_df,test_df,self.response_variable,self.features)
+            mod.model_fit()
+
+            # Predict probabilities
+            y_pred = mod.model_predict(mod.x_test)
+
+            # Compute optimal classification threshold
+            y_true = mod.y_test
+            threshold = minimized_difference_threshold(y_pred,y_true)
+            results_dict['threshold'] = threshold
+
+            # Assign class labels to predictions
+            y_class = mod.model_classify(mod.x_test,threshold)
+
+            ## Compute unweighted performance metrics
+
+            # Threshold-independent metrics
+            results_dict['roc_auc'] = metrics.roc_auc_score(y_true,y_pred)
+            results_dict['avg_prec'] = metrics.average_precision_score(y_true,y_pred)
+            results_dict['bs_loss'] = metrics.brier_score_loss(y_true,y_pred)
+            results_dict['log_loss'] = metrics.log_loss(y_true,y_pred)
+
+            # Threshold-dependent metrics
+            results_dict['accuracy'] = metrics.accuracy_score(y_true,y_class)
+            results_dict['balanced_accuracy'] = metrics.balanced_accuracy_score(y_true,y_class)
+            results_dict['f1_score'] = metrics.f1_score(y_true,y_class)
+            tn, fp, fn, tp = metrics.confusion_matrix(y_true, y_class).ravel()
+            results_dict['sensitivity'] = tp/(tp + fn)
+            results_dict['specificity'] = tn/(tn + fp)
+            results_dict['precision'] = tp/(tp + fp)
+
+            ## Compute weighted performance metrics
+
+            if self.sample_weights is not None:
+
+                sample_weights = self.sample_weights[test_indices]
+
+                # Threshold-independent metrics
+                results_dict['weighted_roc_auc'] = metrics.roc_auc_score(y_true,y_pred,sample_weight=sample_weights)
+                results_dict['weighted_avg_prec'] = metrics.average_precision_score(y_true,y_pred,sample_weight=sample_weights)
+                results_dict['weighted_bs_loss'] = metrics.brier_score_loss(y_true,y_pred,sample_weight=sample_weights)
+                results_dict['weighted_log_loss'] = metrics.log_loss(y_true,y_pred,sample_weight=sample_weights)
+
+                # Threshold-dependent metrics
+                results_dict['weighted_accuracy'] = metrics.accuracy_score(y_true,y_class,sample_weight=sample_weights)
+                results_dict['weighted_balanced_accuracy'] = metrics.balanced_accuracy_score(y_true,y_class,sample_weight=sample_weights)
+                results_dict['weighted_f1_score'] = metrics.f1_score(y_true,y_class,sample_weight=sample_weights)
+                tn, fp, fn, tp = metrics.confusion_matrix(y_true, y_class,sample_weight=sample_weights).ravel()
+                results_dict['weighted_sensitivity'] = tp/(tp + fn)
+                results_dict['weighted_specificity'] = tn/(tn + fp)
+                results_dict['weighted_precision'] = tp/(tp + fp)
+
+            results_list.append(results_dict.copy())
+
+        return(pd.DataFrame(results_list))
 
 # *** Flood event class for implementing data processing and prediction workflow
 
