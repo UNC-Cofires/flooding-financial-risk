@@ -98,7 +98,7 @@ def confusion_matrix(y_pred,y_true,threshold):
 
 def minimized_difference_threshold(y_pred,y_true):
     """
-    Calculate the optimal threshold (cut-point) for classificatin based on
+    Calculate the optimal threshold (cut-point) for classification based on
     the minimized difference criterion defined by Jimenez-Valverde et al.
     (doi:10.1016/j.actao.2007.02.001)
 
@@ -110,6 +110,19 @@ def minimized_difference_threshold(y_pred,y_true):
     abs_diff = lambda x: np.abs(TPR(x) - TNR(x))
     threshold = y_pred[np.argmin(abs_diff(y_pred))]
 
+    return(threshold)
+
+def maximized_fbeta_threshold(y_pred,y_true,beta=1):
+    """
+    Calculate the optimal threshold (cut-point) for classification that
+    maximized the f_beta score (beta=1 equivalent to f1 score).
+
+    param: y_pred: numpy array of predicted class probabilities
+    param: y_true: numpy array of true class labels
+    param: beta: relative importance of recall vs precision
+    """
+    fbeta = np.vectorize(lambda x: metrics.fbeta_score(y_true, (y_pred > x).astype(int), beta=beta))
+    threshold = y_pred[np.argmax(fbeta(y_pred))]
     return(threshold)
 
 # Class for performing K-fold validation
@@ -135,9 +148,11 @@ class ValidationObject:
         self.ROC_curve = None
         self.PR_curve = None
 
-    def cross_validate(self):
+    def cross_validate(self,threshold=None):
         """
         Perform k-fold cross validation
+
+        param: threshold: probability threshold (cut-point) for classification
         """
 
         results_list = []
@@ -159,7 +174,10 @@ class ValidationObject:
 
             # Compute optimal classification threshold
             y_true = mod.y_test
-            threshold = minimized_difference_threshold(y_pred,y_true)
+
+            if threshold is None:
+                threshold = minimized_difference_threshold(y_pred,y_true)
+
             results_dict['threshold'] = threshold
 
             # Assign class labels to predictions
