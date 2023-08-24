@@ -258,15 +258,18 @@ class FloodEvent:
 
         return(None)
 
-    def preprocess_data(self,buildings,claims,policies):
+    def preprocess_data(self,parcels,buildings,claims,policies):
         """
         Determine presence or absence of flooding at building locations based on property-level data
 
+        param: parcels: geodataframe of parcel polygons
         param: buildings: geodataframe of building points
         param: claims: geodataframe of NFIP claims
         param: policies: geodataframe of NFIP policies
         """
         # Check that coordinate reference systems agree
+        if parcels.crs != self.crs:
+            parcels = parcels.to_crs(self.crs)
         if buildings.crs != self.crs:
             buildings = buildings.to_crs(self.crs)
         if claims.crs != self.crs:
@@ -282,6 +285,10 @@ class FloodEvent:
         # Get ids of buildings in study area
         buildings_filter = buildings.intersects(self.study_area)
         included_building_ids = buildings[buildings_filter]['building_id'].unique()
+
+        # Get ids of parcels in study area
+        included_parcel_ids = buildings[buildings_filter]['parcel_id'].unique()
+        parcels_filter = parcels['parcel_id'].isin(included_parcel_ids)
 
         # Get ids of buildings in study area that had a non-zero claim payout during study period
         claims_filter = (claims['building_id'].isin(included_building_ids))
@@ -313,6 +320,7 @@ class FloodEvent:
 
         # Store properties of flood event
         self.flood_damage_status = pd.DataFrame(data={'building_id':event_building_ids,'flood_damage':event_damage_status})
+        self.parcels = parcels[parcels_filter]
         self.buildings = buildings[buildings_filter]
         self.claims = claims[claims_filter]
         self.policies = policies[policies_filter]
@@ -325,14 +333,9 @@ class FloodEvent:
 
     def preprocess_openfema(self,openfema_claims,openfema_policies):
         """
-        param: openfema_claims: geodataframe of openfema claims with census tract geometries
-        param: openfema_policies: geodataframe of openfema policies with census tract geometries
+        param: openfema_claims: pandas dataframe of openfema claims
+        param: openfema_policies: pandas dataframe of openfema policies
         """
-        # Check that coordinate reference systems agree
-        if openfema_claims.crs != self.crs:
-            openfema_claims = openfema_claims.to_crs(self.crs)
-        if openfema_policies.crs != self.crs:
-            openfema_policies = openfema_policies.to_crs(self.crs)
 
         # Convert date columns to pandas datatime format
         openfema_claims['dateOfLoss'] = pd.to_datetime(openfema_claims['dateOfLoss']).dt.tz_localize(None)
@@ -351,10 +354,12 @@ class FloodEvent:
         openfema_policies = openfema_policies[policies_filter]
 
         # Filter by study region
-        openfema_claims = openfema_claims[openfema_claims.intersects(self.study_area)]
-        openfema_policies = openfema_policies[openfema_policies.intersects(self.study_area)]
+        included_tracts = self.buildings['censusTract'].unique()
+        openfema_claims = openfema_claims[openfema_claims['censusTract'].isin(included_tracts)]
+        openfema_policies = openfema_policies[openfema_policies['censusTract'].isin(included_tracts)]
 
         # Create dummy variable that we'll later use to tally claims
+        # (OpenFEMA policy data already includes a policyCount variable)
         openfema_claims['claimCount'] = 1
 
         self.openfema_claims = openfema_claims
@@ -362,97 +367,64 @@ class FloodEvent:
 
         return(None)
 
-    def post_stratify(self,stratification_columns):
+    def stratify_missing(self,stratification_columns):
         """
-        Calculate post-stratification weights for training data using OpenFEMA as an auxiliary data source.
-        param: stratification_columns: list of columns used to define mutually-exclusive subpopulations (post-strata).
+        Determine number of missing flooded and non-flooded buildings within each user-defined strata by
+        comparing against claim/policy counts from OpenFEMA.
+
+        param: stratification_columns: list of columns used to define mutually-exclusive subpopulations (strata).
                Note that columns must be present in both OpenFEMA and training datasets.
         """
+
+        # Calculate number of flooded/nonflooded buildings within each strata in address-level dataset
         training_df = self.training_dataset.copy()
-        training_df = training_df[stratification_columns]
-        training_df['training_count'] = 1
+        training_df = training_df[stratification_columns + ['flood_damage']].rename(columns={'flood_damage':'training_flooded'})
+        training_df['training_nonflooded'] = 1 - training_df['training_flooded']
         training_counts = training_df.groupby(by=stratification_columns).sum().reset_index()
 
-        openfema_columns = stratification_columns.copy()
+        # Calculate number of flooded/nonflooded buildings within each strata in OpenFEMA dataset
+        claim_counts = self.openfema_claims[stratification_columns + ['claimCount']].groupby(by=stratification_columns).sum().reset_index()
+        policy_counts = self.openfema_policies[stratification_columns + ['policyCount']].groupby(by=stratification_columns).sum().reset_index()
 
-        if 'flood_damage' in stratification_columns:
+        openfema_counts = pd.merge(policy_counts,claim_counts,on=stratification_columns,how='left').fillna(0)
+        openfema_counts['openfema_flooded'] = openfema_counts['claimCount'].astype(int)
+        openfema_counts['openfema_nonflooded'] = openfema_counts['policyCount'] - openfema_counts['claimCount']
+        openfema_counts['openfema_nonflooded'] = openfema_counts['openfema_nonflooded'].apply(lambda x: max(x,0)).astype(int)
+        openfema_counts = openfema_counts.drop(columns=['claimCount','policyCount'])
 
-            # If choosing to stratify on presence/absence of flood damage, we need information on both
-            # claims and policies to determine totals in each post-strata
+        strata_counts = pd.merge(openfema_counts,training_counts,on=stratification_columns,how='left').fillna(0)
+        strata_counts['missing_flooded'] = strata_counts['openfema_flooded'] - strata_counts['training_flooded']
+        strata_counts['missing_nonflooded'] = strata_counts['openfema_nonflooded'] - strata_counts['training_nonflooded']
+        strata_counts['missing_flooded'] = strata_counts['missing_flooded'].apply(lambda x: max(x,0)).astype(int)
+        strata_counts['missing_nonflooded'] = strata_counts['missing_nonflooded'].apply(lambda x: max(x,0)).astype(int)
 
-            openfema_columns.remove('flood_damage')
-            claim_counts = self.openfema_claims[openfema_columns + ['claimCount']].groupby(by=openfema_columns).sum().reset_index()
-            policy_counts = self.openfema_policies[openfema_columns + ['policyCount']].groupby(by=openfema_columns).sum().reset_index()
-
-            flooded_counts = pd.merge(policy_counts,claim_counts,on=openfema_columns,how='left').fillna(0)
-            nonflooded_counts = flooded_counts.copy()
-
-            flooded_counts['flood_damage'] = 1
-            nonflooded_counts['flood_damage'] = 0
-
-            flooded_counts['openfema_count'] = flooded_counts['claimCount']
-            nonflooded_counts['openfema_count'] = nonflooded_counts['policyCount'] - nonflooded_counts['claimCount']
-
-            openfema_counts = pd.concat([flooded_counts,nonflooded_counts]).drop(columns=['claimCount','policyCount'])
-
-        else:
-            # If not choosing to stratify on presence/absence of flood damage,
-            # can determine size of post-strata based on policies alone
-            openfema_counts = self.openfema_policies[openfema_columns + ['policyCount']].groupby(by=openfema_columns).sum().reset_index()
-            openfema_counts = openfema_counts.rename(columns={'policyCount':'openfema_count'})
-
-        openfema_counts = openfema_counts.sort_values(by=stratification_columns).reset_index(drop=True)
-
-        post_strata = pd.merge(openfema_counts,training_counts,on=stratification_columns,how='left').fillna(0)
-
-        post_strata['openfema_fraction'] = post_strata['openfema_count']/post_strata['openfema_count'].sum()
-        post_strata['training_fraction'] = post_strata['training_count']/post_strata['training_count'].sum()
-        post_strata['weight'] = post_strata['openfema_fraction']/post_strata['training_fraction']
-
-        self.post_strata = post_strata
-        self.training_dataset = pd.merge(self.training_dataset,post_strata[stratification_columns + ['weight']],on=stratification_columns,how='left')
+        strata_counts['strata'] = strata_counts[stratification_columns].astype(str).apply(lambda x: '_'.join(x),axis=1)
+        self.training_dataset['strata'] = self.training_dataset[stratification_columns].astype(str).apply(lambda x: '_'.join(x),axis=1)
+        self.target_dataset['strata'] = self.target_dataset[stratification_columns].astype(str).apply(lambda x: '_'.join(x),axis=1)
+        self.strata_counts = strata_counts.set_index('strata')
 
         return(None)
 
-    def resample_training_dataset(self,n):
+    def create_pseudo_absences(self,n_realizations=1):
         """
-        Use rejection sampling to create a "weighted" version of the training dataset in which the
-        frequency of various post-strata reflects that of the openfema dataset.
+        Create synthetic nulls (i.e., pseudo-absences) so that within-strata counts of
+        non-flooded buildings match those in OpenFEMA dataset.
 
-        For details of method, see 2003 paper by Zadrozny et al. (doi:10.1109/ICDM.2003.1250950)
-
-        param: n: number of samples to include in final "weighted" dataset.
+        param: n_realizations: number of times to randomly sample pseudo absences from available buildings
+                               (this will increase the size of the adjusted training dataset)
         """
-
-        # g(x) is "proposal" distribution
-        g = self.training_dataset.copy()
-
-        # acceptance probability in rejection sampling is proportional to
-        # the post-stratification weight assigned to observation
-        M = g['weight'].max()
-        g['acceptance_prob'] = g['weight']/M
-
-        ng = len(g)
-        nf = 0
+        sampling_func = lambda x: x.sample(min(self.strata_counts.loc[x.name,'missing_nonflooded'],len(x)))
 
         df_list = []
 
-        # Perform rejection sampling on g(x) until we reach desired number of
-        # observations included in "target" distribution f(x)
-        while nf < n:
-            u = np.random.uniform(size=ng)
-            accept = (u<g['acceptance_prob'])
-            df_list.append(g[accept])
-            nf += np.sum(accept)
+        for i in range(n_realizations):
+            existing_data = self.training_dataset.copy()
+            pseudo_absences = self.target_dataset.groupby('strata',group_keys=False).apply(sampling_func)
+            existing_data['pseudo_absence'] = False
+            pseudo_absences['pseudo_absence'] = True
+            df_list.append(existing_data)
+            df_list.append(pseudo_absences)
 
-        f = pd.concat(df_list).reset_index(drop=True)
-
-        # At this point we'll likely have slightly more than n observations, so we'll drop some to get n rows
-        num_to_remove = nf - n
-        drop_indices = np.random.choice(f.index.values, num_to_remove, replace=False)
-        f = f.drop(drop_indices).reset_index(drop=True)
-        f = f.drop(columns='acceptance_prob')
-
-        self.weighted_training_dataset = f
+        self.adjusted_training_dataset = pd.concat(df_list).reset_index(drop=True)
 
         return(None)
