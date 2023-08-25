@@ -258,7 +258,7 @@ class FloodEvent:
 
         return(None)
 
-    def preprocess_data(self,parcels,buildings,claims,policies):
+    def preprocess_data(self,parcels,buildings,claims,policies,inflation_multiplier=1.0):
         """
         Determine presence or absence of flooding at building locations based on property-level data
 
@@ -266,6 +266,7 @@ class FloodEvent:
         param: buildings: geodataframe of building points
         param: claims: geodataframe of NFIP claims
         param: policies: geodataframe of NFIP policies
+        param: inflation_multiplier: multiplier applied to claim damage amounts to account for inflation
         """
         # Check that coordinate reference systems agree
         if parcels.crs != self.crs:
@@ -318,6 +319,9 @@ class FloodEvent:
         event_building_ids = np.concatenate((flooded_building_ids,nonflooded_building_ids,inconclusive_building_ids))
         event_damage_status = np.concatenate((flood_status,nonflood_status,inconclusive_status))
 
+        # Adjust damages for inflation
+        claims['total_payout'] = claims['total_payout']*inflation_multiplier
+
         # Store properties of flood event
         self.flood_damage_status = pd.DataFrame(data={'building_id':event_building_ids,'flood_damage':event_damage_status})
         self.parcels = parcels[parcels_filter]
@@ -331,10 +335,11 @@ class FloodEvent:
 
         return(None)
 
-    def preprocess_openfema(self,openfema_claims,openfema_policies):
+    def preprocess_openfema(self,openfema_claims,openfema_policies,inflation_multiplier=1.0):
         """
         param: openfema_claims: pandas dataframe of openfema claims
         param: openfema_policies: pandas dataframe of openfema policies
+        param: inflation_multiplier: multiplier applied to claim damage amounts to account for inflation
         """
 
         # Convert date columns to pandas datatime format
@@ -361,6 +366,9 @@ class FloodEvent:
         # Create dummy variable that we'll later use to tally claims
         # (OpenFEMA policy data already includes a policyCount variable)
         openfema_claims['claimCount'] = 1
+
+        # Adjust damages for inflation
+        openfema_claims['total_payout'] = openfema_claims['total_payout']*inflation_multiplier
 
         self.openfema_claims = openfema_claims
         self.openfema_policies = openfema_policies
@@ -417,11 +425,13 @@ class FloodEvent:
 
         df_list = []
 
+        existing_data = self.training_dataset.copy()
+        existing_data['pseudo_absence'] = False
+
         for i in range(n_realizations):
-            existing_data = self.training_dataset.copy()
             pseudo_absences = self.target_dataset.groupby('strata',group_keys=False).apply(sampling_func)
-            existing_data['pseudo_absence'] = False
             pseudo_absences['pseudo_absence'] = True
+            pseudo_absences['flood_damage'] = 0
             df_list.append(existing_data)
             df_list.append(pseudo_absences)
 
