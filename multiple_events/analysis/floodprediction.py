@@ -2,9 +2,11 @@ import pandas as pd
 import numpy as np
 import geopandas as gpd
 import datetime as dt
+import matplotlib.pyplot as plt
 import sklearn.metrics as metrics
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import KFold
+from scipy.interpolate import interp1d
 
 # *** Class for performing Random Forest regression on arbitrary data ***
 
@@ -16,7 +18,7 @@ class RegressionObject:
         param: test_df: pandas dataframe of validation data (m x n+1)
         param: target_df: pandas dataframe of target data (z x n)
         param: response_variable: name of response variable
-        param: features: list of predictors
+        param: features: list of predictors (n)
         """
         self.features = [f for f in features if f != response_variable and f != train_df.index.name]
         self.response_variable = response_variable
@@ -124,106 +126,6 @@ def maximized_fbeta_threshold(y_pred,y_true,beta=1):
     fbeta = np.vectorize(lambda x: metrics.fbeta_score(y_true, (y_pred > x).astype(int), beta=beta))
     threshold = y_pred[np.argmax(fbeta(y_pred))]
     return(threshold)
-
-# Class for performing K-fold validation
-
-class ValidationObject:
-
-    def __init__(self,data,response_variable,features,k=5,sample_weights=None):
-
-        """
-        param: data: pandas dataframe of training data (m x n+1)
-        param: response_variable: name of response variable
-        param: features: list of predictors
-        param: k: number of k-fold cross validation iterations to perform
-        param: sample_weights: numpy array of weights for calculation of weighted performance metrics
-        """
-        self.data = data
-        self.features = [f for f in features if f != response_variable and f != data.index.name]
-        self.response_variable = response_variable
-        self.k = k
-        self.kf = KFold(n_splits=self.k,random_state=None,shuffle=True)
-        self.sample_weights = sample_weights
-
-        self.ROC_curve = None
-        self.PR_curve = None
-
-    def cross_validate(self,threshold=None):
-        """
-        Perform k-fold cross validation
-
-        param: threshold: probability threshold (cut-point) for classification
-        """
-
-        results_list = []
-
-        # Split in to k test/train folds
-        for k,(train_indices,test_indices) in enumerate(self.kf.split(self.data)):
-
-            results_dict = {'fold':k}
-
-            train_df = self.data.iloc[train_indices].copy()
-            test_df = self.data.iloc[test_indices].copy()
-
-            # Fit model
-            mod = RegressionObject(train_df,test_df,test_df,self.response_variable,self.features)
-            mod.model_fit()
-
-            # Predict probabilities
-            y_pred = mod.model_predict(mod.x_test)
-
-            # Compute optimal classification threshold
-            y_true = mod.y_test
-
-            if threshold is None:
-                threshold = minimized_difference_threshold(y_pred,y_true)
-
-            results_dict['threshold'] = threshold
-
-            # Assign class labels to predictions
-            y_class = mod.model_classify(mod.x_test,threshold)
-
-            ## Compute unweighted performance metrics
-
-            # Threshold-independent metrics
-            results_dict['roc_auc'] = metrics.roc_auc_score(y_true,y_pred)
-            results_dict['avg_prec'] = metrics.average_precision_score(y_true,y_pred)
-            results_dict['bs_loss'] = metrics.brier_score_loss(y_true,y_pred)
-            results_dict['log_loss'] = metrics.log_loss(y_true,y_pred)
-
-            # Threshold-dependent metrics
-            results_dict['accuracy'] = metrics.accuracy_score(y_true,y_class)
-            results_dict['balanced_accuracy'] = metrics.balanced_accuracy_score(y_true,y_class)
-            results_dict['f1_score'] = metrics.f1_score(y_true,y_class)
-            tn, fp, fn, tp = metrics.confusion_matrix(y_true, y_class).ravel()
-            results_dict['sensitivity'] = tp/(tp + fn)
-            results_dict['specificity'] = tn/(tn + fp)
-            results_dict['precision'] = tp/(tp + fp)
-
-            ## Compute weighted performance metrics
-
-            if self.sample_weights is not None:
-
-                sample_weights = self.sample_weights[test_indices]
-
-                # Threshold-independent metrics
-                results_dict['weighted_roc_auc'] = metrics.roc_auc_score(y_true,y_pred,sample_weight=sample_weights)
-                results_dict['weighted_avg_prec'] = metrics.average_precision_score(y_true,y_pred,sample_weight=sample_weights)
-                results_dict['weighted_bs_loss'] = metrics.brier_score_loss(y_true,y_pred,sample_weight=sample_weights)
-                results_dict['weighted_log_loss'] = metrics.log_loss(y_true,y_pred,sample_weight=sample_weights)
-
-                # Threshold-dependent metrics
-                results_dict['weighted_accuracy'] = metrics.accuracy_score(y_true,y_class,sample_weight=sample_weights)
-                results_dict['weighted_balanced_accuracy'] = metrics.balanced_accuracy_score(y_true,y_class,sample_weight=sample_weights)
-                results_dict['weighted_f1_score'] = metrics.f1_score(y_true,y_class,sample_weight=sample_weights)
-                tn, fp, fn, tp = metrics.confusion_matrix(y_true, y_class,sample_weight=sample_weights).ravel()
-                results_dict['weighted_sensitivity'] = tp/(tp + fn)
-                results_dict['weighted_specificity'] = tn/(tn + fp)
-                results_dict['weighted_precision'] = tp/(tp + fp)
-
-            results_list.append(results_dict.copy())
-
-        return(pd.DataFrame(results_list))
 
 # *** Flood event class for implementing data processing and prediction workflow
 
@@ -436,5 +338,170 @@ class FloodEvent:
             df_list.append(pseudo_absences)
 
         self.adjusted_training_dataset = pd.concat(df_list).reset_index(drop=True)
+
+        return(None)
+
+    def cross_validate(self,response_variable,features,k=5,use_adjusted=True,threshold=None):
+        """
+        param: response_variable: name of response variable
+        param: features: list of predictors
+        param: k: number of k-fold cross validation iterations to perform
+        param: use_adjusted: if true, train models using adjusted training data which includes pseudo-absences
+                            (note that we still test on genuine observations)
+        param: threshold: probability threshold used for classification
+        """
+
+        features = [f for f in features if f != response_variable]
+        kf = KFold(n_splits=k,random_state=None,shuffle=True)
+
+        if threshold is None:
+            compute_threshold = True
+        else:
+            compute_threshold = False
+
+        results_list = []
+
+        fpr_viz_vals = np.linspace(0,1,501)
+        tpr_viz_vals = np.zeros((k,fpr_viz_vals.shape[0]))
+        roc_labels = []
+
+        rec_viz_vals = np.linspace(0,1,501)
+        prec_viz_vals = np.zeros((k,rec_viz_vals.shape[0]))
+        pr_labels = []
+
+        for i,(train_indices,test_indices) in enumerate(kf.split(self.training_dataset)):
+
+            results_dict = {'fold':i}
+
+            test_df = self.training_dataset.iloc[test_indices].copy()
+
+            if use_adjusted:
+
+                # Exclude buildings included in test set from training data
+                test_building_ids = test_df['building_id']
+                m1 = self.adjusted_training_dataset['building_id'].isin(test_building_ids)
+
+                # Randomly drop 1/k of pseudo-absences to maintain balance
+                m2 = self.adjusted_training_dataset['pseudo_absence']
+                m3 = np.random.rand(len(self.adjusted_training_dataset)) < 1/k
+
+                records_to_drop = m1|(m2&m3)
+                train_df = self.adjusted_training_dataset[~records_to_drop].copy()
+
+            else:
+                train_df = self.training_dataset.iloc[train_indices].copy()
+
+            # Fit model
+            mod = RegressionObject(train_df,test_df,test_df,response_variable,features)
+            mod.model_fit()
+
+            # Predict probabilities
+            y_pred = mod.model_predict(mod.x_test)
+
+            # Compute optimal classification threshold
+            y_true = mod.y_test
+
+            if compute_threshold:
+                threshold = minimized_difference_threshold(y_pred,y_true)
+
+            results_dict['threshold'] = threshold
+
+            # Assign class labels to predictions
+            y_class = mod.model_classify(mod.x_test,threshold)
+
+            # Compute performance metrics
+
+            # Threshold-independent metrics
+            results_dict['roc_auc'] = metrics.roc_auc_score(y_true,y_pred)
+            results_dict['avg_prec'] = metrics.average_precision_score(y_true,y_pred)
+            results_dict['bs_loss'] = metrics.brier_score_loss(y_true,y_pred)
+            results_dict['log_loss'] = metrics.log_loss(y_true,y_pred)
+
+            # Threshold-dependent metrics
+            results_dict['accuracy'] = metrics.accuracy_score(y_true,y_class)
+            results_dict['balanced_accuracy'] = metrics.balanced_accuracy_score(y_true,y_class)
+            results_dict['f1_score'] = metrics.f1_score(y_true,y_class)
+            tn, fp, fn, tp = metrics.confusion_matrix(y_true, y_class).ravel()
+            results_dict['sensitivity'] = tp/(tp + fn)
+            results_dict['specificity'] = tn/(tn + fp)
+            results_dict['precision'] = tp/(tp + fp)
+
+            # Get data needed for ROC and PR curves
+            fpr_vals, tpr_vals, threshold_vals = metrics.roc_curve(y_true, y_pred)
+            roc_interp_func = interp1d(fpr_vals,tpr_vals)
+            tpr_viz_vals[i,:] = roc_interp_func(fpr_viz_vals)
+            auc_rounded = np.round(results_dict['roc_auc'],2)
+            roc_labels.append(f'ROC fold {i+1} (AUC={auc_rounded})')
+
+            prec_vals, rec_vals, threshold_vals = metrics.precision_recall_curve(y_true, y_pred)
+            pr_interp_func = interp1d(rec_vals,prec_vals)
+            prec_viz_vals[i,:] = pr_interp_func(rec_viz_vals)
+            ap_rounded = np.round(results_dict['avg_prec'],2)
+            pr_labels.append(f'PR fold {i+1} (AP={ap_rounded})')
+
+            results_list.append(results_dict.copy())
+
+        # Save performance metrics in dataframe
+        results_df = pd.DataFrame(results_list)
+
+        # Create ROC curve plot
+        roc_mean = np.round(results_df['roc_auc'].mean(),2)
+        roc_std = np.round(results_df['roc_auc'].std(),2)
+
+        tpr_mean = tpr_viz_vals.mean(axis=0)
+        tpr_std = tpr_viz_vals.std(axis=0)
+
+        roc_fig,ax = plt.subplots(nrows=1,ncols=1,figsize=(6,6))
+        ax.set_aspect('equal', adjustable='box')
+
+        for i in range(k):
+            ax.plot(fpr_viz_vals,tpr_viz_vals[i],alpha=0.65,label=roc_labels[i])
+
+        ax.plot(fpr_viz_vals,tpr_mean,'k',lw=2,label=f'Mean ROC (AUC={roc_mean}±{roc_std})')
+        ax.fill_between(fpr_viz_vals, tpr_mean - tpr_std, tpr_mean + tpr_std,color='gray',alpha=0.2,label=f'±1 std. dev.')
+        ax.plot([0,1],[0,1],'k--',alpha=0.65,label='Random classifier (AUC=0.5)')
+
+        ax.set_xlim([0,1])
+        ax.set_ylim([0,1])
+
+        ax.set_xlabel('False positive rate')
+        ax.set_ylabel('True positive rate')
+        ax.set_title('Receiver operating characteristic (ROC) curve')
+
+        ax.legend()
+        roc_fig.tight_layout()
+
+        # Create PR curve plot
+
+        pr_mean = np.round(results_df['avg_prec'].mean(),2)
+        pr_std = np.round(results_df['avg_prec'].std(),2)
+
+        prec_mean = prec_viz_vals.mean(axis=0)
+        prec_std = prec_viz_vals.std(axis=0)
+
+        pr_random = np.round(self.training_dataset[response_variable].mean(),2)
+
+        pr_fig,ax = plt.subplots(nrows=1,ncols=1,figsize=(6,6))
+
+        for i in range(k):
+            ax.plot(rec_viz_vals,prec_viz_vals[i],alpha=0.65,label=pr_labels[i])
+
+        ax.plot(rec_viz_vals,prec_mean,'k',lw=2,label=f'Mean PR (AP={pr_mean}±{pr_std})')
+        ax.fill_between(rec_viz_vals, prec_mean - prec_std, prec_mean + prec_std,color='gray',alpha=0.2,label=f'±1 std. dev.')
+        ax.plot([0,1],[pr_random,pr_random],'k--',alpha=0.65,label=f'Random classifier (AP={pr_random})')
+
+        ax.set_xlim([0,1])
+        ax.set_ylim([None,1])
+
+        ax.set_xlabel('Recall')
+        ax.set_ylabel('Precision')
+        ax.set_title('Precision-Recall (PR) curve')
+
+        ax.legend()
+        pr_fig.tight_layout()
+
+        self.performance_metrics = results_df
+        self.roc_curve = roc_fig
+        self.pr_curve = pr_fig
 
         return(None)
