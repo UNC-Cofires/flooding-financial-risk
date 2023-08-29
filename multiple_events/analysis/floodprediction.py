@@ -401,8 +401,11 @@ class FloodEvent:
         existing_data = self.training_dataset.copy()
         existing_data['pseudo_absence'] = False
 
+        # Buildings that we could select as pseudo absences
+        potential_pseudo_absences = self.target_dataset[self.target_dataset['strata'].isin(self.strata_counts.index)]
+
         for i in range(n_realizations):
-            pseudo_absences = self.target_dataset.groupby('strata',group_keys=False).apply(sampling_func)
+            pseudo_absences = potential_pseudo_absences.groupby('strata',group_keys=False).apply(sampling_func)
             pseudo_absences['pseudo_absence'] = True
             pseudo_absences['flood_damage'] = 0
             df_list.append(existing_data)
