@@ -71,6 +71,75 @@ class RegressionObject:
 
         return(None)
 
+# Function to impute values of missing attributes in spatial data
+def impute_missing_spatially(gdf,columns=None):
+    """
+    Impute missing values by copying from nearest non-missing neighbor.
+
+    param: gdf: geopandas geodataframe
+    param: columns: list of columns to spatially impute missing values for
+    """
+
+    # Assess all columns if not specified
+    if columns is None:
+        columns = gdf.columns
+
+    # Get list of columns with missing values
+    nan_columns = []
+    for column in columns:
+        if gdf[column].isna().sum() > 0:
+            nan_columns.append(column)
+
+    # Impute missing values based on nearest non-missing neighbor
+    for column in nan_columns:
+        m = gdf[column].isna()
+        imputed_values = gpd.sjoin_nearest(gdf[m][['geometry']],gdf[~m][[column,'geometry']],how='left')[column]
+        gdf.loc[imputed_values.index,column] = imputed_values
+
+    return(gdf)
+
+# Helper function to remove uninformative features
+def remove_unnecessary_features(features,data,max_corr=1.0):
+    """
+    param: features: list of predictors to use in regression
+    param: data: pandas dataframe with columns that include features
+    param: max_corr: maxiumum absolute correlation allowed between features
+    """
+
+    informative_features = []
+
+    # Remove features that have no variation
+    for feature in features:
+        if len(data[feature].unique()) > 1:
+            informative_features.append(feature)
+
+    # Remove features that are highly correlated with another
+    corrmat = data[informative_features].corr()
+
+    pair_corr = corrmat.unstack().reset_index()
+    pair_corr.columns = ['var1','var2','abs_corr']
+    pair_corr['abs_corr'] = np.abs(pair_corr['abs_corr'])
+    pair_corr['combo'] = pair_corr.apply(lambda x: '-'.join(np.sort([x['var1'],x['var2']])),axis=1)
+    pair_corr = pair_corr.loc[pair_corr['combo'].drop_duplicates().index]
+    pair_corr = pair_corr[pair_corr['var1'] != pair_corr['var2']]
+    pair_corr = pair_corr.sort_values(by='abs_corr',ascending=False)
+
+    problem_corr = pair_corr[pair_corr['abs_corr'] > max_corr]
+
+    removed_features = []
+
+    while len(problem_corr) > 0:
+
+        var_to_remove = problem_corr.iloc[0]['var2']
+        removed_features.append(var_to_remove)
+
+        pair_corr = pair_corr[~((pair_corr['var1']==var_to_remove)|(pair_corr['var2']==var_to_remove))]
+        problem_corr = pair_corr[pair_corr['abs_corr'] > max_corr]
+
+    informative_features = [x for x in informative_features if x not in removed_features]
+
+    return(informative_features)
+
 # Helper function to compute elements of confusion matrix
 # as well as optimal probability threshold for classification
 
@@ -90,9 +159,11 @@ def confusion_matrix(y_pred,y_true,threshold):
     P = TP + FN
     N = TN + FP
 
-    TPR = TP/P
-    TNR = TN/N
-    PPV = TP/(TP + FP)
+    smallnum = np.finfo(float).eps # Small number to prevent float division by zero
+
+    TPR = TP/(P + smallnum)
+    TNR = TN/(N + smallnum)
+    PPV = TP/(TP + FP + smallnum)
 
     # Return result as dictionary
     d = {'TP':TP,'FP':FP,'TN':TN,'FN':FN,'TPR':TPR,'TNR':TNR,'PPV':PPV}
@@ -505,3 +576,124 @@ class FloodEvent:
         self.pr_curve = pr_fig
 
         return(None)
+
+    def predict_presence_absence(self,response_variable,features,use_adjusted=True,threshold=0.5):
+        """
+        Predict the presence/absence of flooding at target locations.
+
+        param: response_variable: name of response variable
+        param: features: list of predictors
+        param: use_adjusted: if true, train models using adjusted training data which includes pseudo-absences
+                            (note that we still test on genuine observations)
+        param: threshold: probability threshold used for classification
+        """
+
+        if use_adjusted:
+            mod = RegressionObject(self.adjusted_training_dataset,self.adjusted_training_dataset,self.target_dataset,response_variable,features)
+        else:
+            mod = RegressionObject(self.training_dataset,self.training_dataset,self.target_dataset,response_variable,features)
+
+        # Fit Random Forest model
+        mod.model_fit()
+
+        # Predict presence of flood damage
+        self.target_dataset[f'{response_variable}_prob'] = mod.model_predict(mod.x_target)
+        self.target_dataset[f'{response_variable}_class'] = mod.model_classify(mod.x_target,threshold)
+
+        # Get feature importance
+        importances = mod.model.feature_importances_
+        std = np.std([tree.feature_importances_ for tree in mod.model.estimators_], axis=0)
+        importance_order = np.argsort(importances)
+
+        importances = importances[importance_order]
+        std = std[importance_order]
+        sorted_features = np.array(features)[importance_order]
+
+        fig,ax = plt.subplots(nrows=1,ncols=1,figsize=(6,4))
+        ax.barh(sorted_features, importances, xerr=std, align='center',color='C0',alpha=0.5,lw=1,edgecolor='k')
+        ax.set_xlim([0,None])
+        ax.set_xlabel('Mean decrease in impurity (MDI)')
+        ax.set_title('Random Forest Feature Importance')
+
+        self.presence_absence_features = features
+        self.presence_absence_response_variable = response_variable
+        self.presence_absence_feature_importance = fig
+        self.presence_absence_model = mod
+
+        return(None)
+
+    def predict_damage_cost(self,presence_variable,cost_variable,features):
+        """
+        Predict the cost of flood damage among flooded homes.
+
+        param: presence_variable: name of variable denoting presence of flood damage
+        param: cost_variable: name of variable denoting cost of flood damage
+        param: features: list of predictors
+        """
+
+        # If more than one claim matches to a building, take one with higher payout
+        payouts_by_building = self.claims[['building_id',cost_variable]].groupby('building_id').max().reset_index()
+
+        self.training_dataset[cost_variable] = self.training_dataset[['building_id']].merge(payouts_by_building,how='left',on='building_id')[cost_variable].fillna(0)
+
+        damage_cost_training = self.training_dataset[(self.training_dataset[presence_variable]==1)]
+        damage_cost_target = self.target_dataset[(self.target_dataset[f'{presence_variable}_class']==1)]
+
+        mod = RegressionObject(damage_cost_training,damage_cost_training,damage_cost_target,cost_variable,features)
+
+        # Fit Random Forest model
+        mod.model_fit()
+
+        # Compute R^2 using training data
+        y_pred = mod.model_predict(mod.x_test)
+        y_true = mod.y_test
+        errors = y_true - y_pred
+        SSE = np.sum(errors**2)
+        SST = np.sum((y_true - np.mean(y_true))**2)
+        R_sq = 1 - SSE/SST
+        RMSE = np.sqrt(np.mean(errors**2))
+
+        self.damage_cost_RMSE = RMSE
+        self.damage_cost_R_sq = R_sq
+
+        # Predict cost of damage among buildings predicted as flooded
+        damage_cost_target[cost_variable] = mod.model_predict(mod.x_target)
+
+        # Join back to target dataset
+        self.target_dataset[cost_variable] = self.target_dataset[['building_id']].merge(damage_cost_target[['building_id',cost_variable]],how='left',on='building_id')[cost_variable].fillna(0)
+
+        # Save info
+        self.damage_cost_features = features
+        self.damage_cost_response_variable = cost_variable
+        self.damage_cost_model = mod
+
+        # Get feature importance
+        importances = mod.model.feature_importances_
+        std = np.std([tree.feature_importances_ for tree in mod.model.estimators_], axis=0)
+        importance_order = np.argsort(importances)
+
+        importances = importances[importance_order]
+        std = std[importance_order]
+        sorted_features = np.array(features)[importance_order]
+
+        fig,ax = plt.subplots(nrows=1,ncols=1,figsize=(6,4))
+        ax.barh(sorted_features, importances, xerr=std, align='center',color='C0',alpha=0.5,lw=1,edgecolor='k')
+        ax.set_xlim([0,None])
+        ax.set_xlabel('Mean decrease in impurity (MDI)')
+        ax.set_title('Random Forest Feature Importance')
+
+        self.damage_cost_feature_importance = fig
+
+        return(None)
+
+    def aggregate_flood_damage(self):
+        """
+        Combine estimates of insured (i.e., training) and uninsured (i.e., target) losses to create
+        overall estimate of flood damage in study region.
+        """
+        train_df = self.training_dataset[['building_id','geometry','flood_damage','total_payout']].rename(columns={'flood_damage':'flood_damage_class'})
+        train_df['flood_damage_prob'] = train_df['flood_damage_class']
+        target_df = self.target_dataset[['building_id','geometry','flood_damage_prob','flood_damage_class','total_payout']]
+        overall_df = pd.concat([train_df,target_df])
+
+        return(overall_df)
