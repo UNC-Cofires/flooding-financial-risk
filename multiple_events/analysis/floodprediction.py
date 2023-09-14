@@ -689,14 +689,33 @@ class FloodEvent:
 
         return(None)
 
-    def aggregate_flood_damage(self):
+    def aggregate_flood_damage(self,stratification_columns):
         """
         Combine estimates of insured (i.e., training) and uninsured (i.e., target) losses to create
         overall estimate of flood damage in study region.
-        """
-        train_df = self.training_dataset[['building_id','geometry','flood_damage','total_payout']].rename(columns={'flood_damage':'flood_damage_class'})
-        train_df['flood_damage_prob'] = train_df['flood_damage_class']
-        target_df = self.target_dataset[['building_id','geometry','flood_damage_prob','flood_damage_class','total_payout']]
-        overall_df = pd.concat([train_df,target_df])
 
-        return(overall_df)
+        param: stratification_columns: list of columns used to aggregate damage estimates.
+        """
+        insured_df = self.training_dataset[['building_id','geometry','flood_damage','total_payout'] + stratification_columns].rename(columns={'flood_damage':'flood_damage_class'})
+        insured_df['flood_damage_prob'] = insured_df['flood_damage_class']
+        insured_df['insured'] = 1
+        uninsured_df = self.target_dataset[['building_id','geometry','flood_damage_prob','flood_damage_class','total_payout'] + stratification_columns]
+        uninsured_df['insured'] = 0
+        combined_df = pd.concat([insured_df,uninsured_df]).reset_index(drop=True)
+        combined_columns = ['building_id'] + stratification_columns + ['insured','flood_damage_prob','flood_damage_class','total_payout','geometry']
+        combined_df = combined_df[combined_columns]
+
+        agg_dict = {'building_id':'count','flood_damage_class':'sum','total_payout':'sum'}
+        insured_rename_dict = {'building_id':'n_insured','flood_damage_class':'n_flooded_insured','total_payout':'cost_flooded_insured'}
+        uninsured_rename_dict = {'building_id':'n_uninsured','flood_damage_class':'n_flooded_uninsured','total_payout':'cost_flooded_uninsured'}
+        combined_rename_dict = {'building_id':'n_total','flood_damage_class':'n_flooded_total','total_payout':'cost_flooded_total'}
+
+        insured_agg = insured_df[stratification_columns + list(agg_dict.keys())].groupby(stratification_columns).agg(agg_dict).rename(columns=insured_rename_dict)
+        uninsured_agg = uninsured_df[stratification_columns + list(agg_dict.keys())].groupby(stratification_columns).agg(agg_dict).rename(columns=uninsured_rename_dict)
+        combined_agg = combined_df[stratification_columns + list(agg_dict.keys())].groupby(stratification_columns).agg(agg_dict).rename(columns=combined_rename_dict)
+
+        agg_df = insured_agg.join(uninsured_agg,how='outer').join(combined_agg,how='outer')
+        agg_df = agg_df[['n_insured','n_uninsured','n_total','n_flooded_insured','n_flooded_uninsured','n_flooded_total','cost_flooded_insured','cost_flooded_uninsured','cost_flooded_total']].reset_index()
+        agg_df = agg_df.sort_values(by=stratification_columns)
+
+        return(agg_df,combined_df)

@@ -156,7 +156,7 @@ reference_row = inflation[inflation['DATE'] >= reference_date].iloc[0]
 nominal_row = inflation[inflation['DATE'] >= event['peak_date']].iloc[0]
 
 # Select measure of inflation to use and calculate multiplier
-inflation_measure = 'USACPICORMINMEI' # CPI - All items excluding food and energy
+inflation_measure = 'USACPIALLMINMEI' # CPI - All items for United States
 inflation_multiplier = reference_row[inflation_measure]/nominal_row[inflation_measure]
 
 ### *** PREDICT PRESENCE / ABSENCE OF FLOOD DAMAGE *** ###
@@ -202,10 +202,13 @@ presence_absence_features += huc_columns
 presence_absence_features = fp.remove_unnecessary_features(presence_absence_features,floodevent.training_dataset,max_corr=0.7)
 
 # Perform k-fold cross-validation
-floodevent.cross_validate(response_variable,presence_absence_features,k=5,use_adjusted=True,threshold=0.6)
+floodevent.cross_validate(response_variable,presence_absence_features,k=5,use_adjusted=True,threshold=None)
+
+# Determine optimal threshold from cross validation results
+threshold = floodevent.performance_metrics['threshold'].mean()
 
 # Predict presence/absence of flooding
-floodevent.predict_presence_absence(response_variable,presence_absence_features,use_adjusted=True,threshold=0.6)
+floodevent.predict_presence_absence(response_variable,presence_absence_features,use_adjusted=True,threshold=threshold)
 
 ### *** PREDICT COST OF DAMAGES AMONG FLOODED HOMES *** ###
 
