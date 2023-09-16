@@ -56,6 +56,12 @@ census_tracts_path = f'/proj/characklab/flooddata/NC/multiple_events/geospatial_
 census_tracts = gpd.read_file(census_tracts_path).to_crs(crs)
 census_tracts = census_tracts.rename(columns={'GEOID':'censusTract'})
 
+# Read in data on NC zip codes (use census ZCTAs as proxy)
+ZCTA_year = max((event_date.year // 10)*10,2000) # Use ZCTA boundaries from most recent census since 2000
+ZCTA_path = f'/proj/characklab/flooddata/NC/multiple_events/geospatial_data/TIGER/nc_{ZCTA_year}_ZCTAs_clean'
+ZCTAs = gpd.read_file(ZCTA_path).to_crs(crs)
+ZCTAs = ZCTAs.rename(columns={'ZCTA':'reportedZipCode'})
+
 # Read in data on NC HUC6 watersheds
 watersheds_path = '/proj/characklab/flooddata/NC/multiple_events/geospatial_data/USGS/NC_HUC6'
 watersheds = gpd.read_file(watersheds_path).to_crs(crs)
@@ -69,6 +75,9 @@ buildings = gpd.sjoin(buildings,counties,how='left',predicate='within').drop(col
 # Attach census tract codes to buildings
 # (use sjoin_nearest instead of sjoin since some coastal buildings fall just outside tract boundaries)
 buildings = gpd.sjoin_nearest(buildings,census_tracts,how='left',max_distance=1000).drop(columns='index_right')
+
+# Attach zip codes to buildings
+buildings = gpd.sjoin_nearest(buildings,ZCTAs,how='left',max_distance=1000).drop(columns='index_right')
 
 # Attach HUC6 watershed codes to buildings
 buildings = gpd.sjoin(buildings,watersheds,how='left',predicate='within').drop(columns='index_right')
@@ -107,15 +116,17 @@ buildings = buildings.join(pd.get_dummies(buildings['FOUND_TYPE'],prefix='FOUND_
 
 ### *** LOAD AUXILIARY DATA SOURCES *** ###
 
+## OpenFEMA
+
 # Read in openfema data
-openfema_claims_path = '/proj/characklab/flooddata/NC/multiple_events/geospatial_data/OpenFEMA/NC_FemaNfipClaims.csv'
-openfema_policies_path = '/proj/characklab/flooddata/NC/multiple_events/geospatial_data/OpenFEMA/NC_FemaNfipPolicies.csv'
-openfema_claims = pd.read_csv(openfema_claims_path,index_col=0).rename(columns={'reportedZipcode':'reportedZipCode'})
-openfema_policies = pd.read_csv(openfema_policies_path,index_col=0)
+openfema_claims_path = '/proj/characklab/flooddata/NC/multiple_events/geospatial_data/OpenFEMA/NC_FemaNfipClaims_v2.csv'
+openfema_policies_path = '/proj/characklab/flooddata/NC/multiple_events/geospatial_data/OpenFEMA/NC_FemaNfipPolicies_v2.csv'
+openfema_claims = pd.read_csv(openfema_claims_path).rename(columns={'ratedFloodZone':'floodZone'})
+openfema_policies = pd.read_csv(openfema_policies_path).rename(columns={'ratedFloodZone':'floodZone'})
 
 # Keep only required columns
-openfema_keepcols_claims = ['countyCode','censusTract','floodZone','dateOfLoss','amountPaidOnBuildingClaim','amountPaidOnContentsClaim']
-openfema_keepcols_policies = ['countyCode','censusTract','floodZone','policyEffectiveDate','policyTerminationDate','policyCount']
+openfema_keepcols_claims = ['countyCode','censusTract','reportedZipCode','nfipRatedCommunityNumber','floodZone','dateOfLoss','amountPaidOnBuildingClaim','amountPaidOnContentsClaim']
+openfema_keepcols_policies = ['countyCode','censusTract','reportedZipCode','nfipRatedCommunityNumber','floodZone','policyEffectiveDate','policyTerminationDate','policyCount']
 
 openfema_claims = openfema_claims[openfema_keepcols_claims]
 openfema_policies = openfema_policies[openfema_keepcols_policies]
@@ -123,11 +134,15 @@ openfema_policies = openfema_policies[openfema_keepcols_policies]
 # Format columns
 openfema_claims['countyCode'] = openfema_claims['countyCode'].astype(str).apply(lambda x: x[2:-2])
 openfema_claims['censusTract'] = openfema_claims['censusTract'].astype(str).apply(lambda x: x[:-2])
+openfema_claims['reportedZipCode'] = openfema_claims['reportedZipCode'].apply(lambda x: str(x).split('.')[0])
+openfema_claims['nfipRatedCommunityNumber'] = openfema_claims['nfipRatedCommunityNumber'].apply(lambda x: str(x).split('.')[0][:6])
 openfema_claims['dateOfLoss'] = openfema_claims['dateOfLoss'].astype(np.datetime64)
 openfema_claims['floodZone'] = openfema_claims['floodZone'].astype(str)
 
 openfema_policies['countyCode'] = openfema_policies['countyCode'].astype(str).apply(lambda x: x[2:-2])
 openfema_policies['censusTract'] = openfema_policies['censusTract'].astype(str).apply(lambda x: x[:-2])
+openfema_policies['reportedZipCode'] = openfema_policies['reportedZipCode'].apply(lambda x: str(x).split('.')[0])
+openfema_policies['nfipRatedCommunityNumber'] = openfema_policies['nfipRatedCommunityNumber'].apply(lambda x: str(x).split('.')[0][:6])
 openfema_policies['policyEffectiveDate'] = openfema_policies['policyEffectiveDate'].astype(np.datetime64)
 openfema_policies['policyTerminationDate'] = openfema_policies['policyTerminationDate'].astype(np.datetime64)
 openfema_policies['floodZone'] = openfema_policies['floodZone'].astype(str)
@@ -142,6 +157,37 @@ openfema_claims['amountPaidOnContentsClaim'] = openfema_claims['amountPaidOnCont
 openfema_claims['total_payout'] = openfema_claims['amountPaidOnBuildingClaim'] + openfema_claims['amountPaidOnContentsClaim']
 openfema_claims = openfema_claims.dropna()
 openfema_policies = openfema_policies.dropna()
+
+## Data collected by EDF via FOIA request that includes pre-2009 policy data
+edf_policies_path = '/proj/characklab/flooddata/NC/multiple_events/geospatial_data/EDF/edf_nc_nfip_policies.csv'
+edf_policies = pd.read_csv(edf_policies_path,dtype={'ZIP1':str,'COMMUNITY':str},index_col=0)
+edf_policies = edf_policies.rename(columns={'ZIP1':'reportedZipCode','COMMUNITY':'nfipRatedCommunityNumber','FLOOD_ZONE':'floodZone','POL_EFF_DT':'policyEffectiveDate','POL_EXP_DT':'policyTerminationDate'})
+
+# Drop non-NC policies
+edf_policies = edf_policies[edf_policies['STATE']=='NC']
+edf_policies = edf_policies[edf_policies['nfipRatedCommunityNumber'].apply(lambda x: x.startswith('37'))]
+
+# Format columns
+edf_policies['policyEffectiveDate'] = edf_policies['policyEffectiveDate'].astype(np.datetime64)
+edf_policies['policyTerminationDate'] = edf_policies['policyTerminationDate'].astype(np.datetime64)
+edf_policies['nfipRatedCommunityNumber'] = edf_policies['nfipRatedCommunityNumber'].apply(lambda x: x[:6])
+edf_policies['policyCount']=1
+
+edf_keepcols = ['reportedZipCode','nfipRatedCommunityNumber','floodZone','policyEffectiveDate','policyTerminationDate','policyCount','SFHA']
+edf_policies = edf_policies[edf_keepcols]
+edf_policies = edf_policies.dropna()
+
+## Combine EDF and OpenFEMA policy data to create a single auxiliary dataset of claim/policy info
+
+# Use OpenFEMA data for post-2009 policies and EDF data for pre-2009 policies
+openfema_date = '2009-01-01'
+openfema_policies = openfema_policies[openfema_policies['policyEffectiveDate']>=openfema_date]
+edf_policies = edf_policies[edf_policies['policyEffectiveDate']<openfema_date]
+
+# Combine into single auxiliary dataset
+auxiliary_keepcols_policies = ['countyCode','censusTract','reportedZipCode','nfipRatedCommunityNumber', 'floodZone','SFHA','policyEffectiveDate','policyTerminationDate','policyCount']
+auxiliary_policies = pd.concat([edf_policies,openfema_policies]).reset_index(drop=True)[auxiliary_keepcols_policies]
+auxiliary_claims = openfema_claims.reset_index(drop=True)
 
 ### *** ADJUST DAMAGES FOR INFLATION *** ###
 
@@ -170,17 +216,30 @@ end_date = event['end_date']
 peak_date = event['peak_date']
 event_name = event['name']
 
-# Process address-level data.
+# Specify probability threshold used to classify homes as flooded/non-flooded
+threshold=0.35
+
+# Process address-level data
 print(event_name,flush=True)
 
-floodevent = fp.FloodEvent(study_area,start_date,end_date,peak_date,crs)
+# For post-2009, use OpenFEMA totals by census tract
+# For pre-2009, use EDF totals by zipcode
+if peak_date >= openfema_date:
+    auxiliary_units = census_tracts
+    unit_name = 'censusTract'
+else:
+    auxiliary_units = ZCTAs
+    unit_name = 'reportedZipCode'
+
+floodevent = fp.FloodEvent(study_area,start_date,end_date,peak_date,crs,auxiliary_units)
 floodevent.preprocess_data(parcels,buildings,claims,policies,inflation_multiplier)
 
 # Use OpenFEMA data to determine where policies are missing.
 # Based on this information, generate pseudo-absences
-floodevent.preprocess_openfema(openfema_claims,openfema_policies,inflation_multiplier)
-floodevent.stratify_missing(['censusTract','SFHA'])
+floodevent.preprocess_auxiliary(auxiliary_claims,auxiliary_policies,unit_name,inflation_multiplier)
+floodevent.stratify_missing([unit_name,'SFHA'])
 floodevent.create_pseudo_absences(n_realizations=100)
+floodevent.crop_to_study_area()
 
 # Define features used to predict presence/absence of flood damage
 response_variable = 'flood_damage'
@@ -202,10 +261,7 @@ presence_absence_features += huc_columns
 presence_absence_features = fp.remove_unnecessary_features(presence_absence_features,floodevent.training_dataset,max_corr=0.7)
 
 # Perform k-fold cross-validation
-floodevent.cross_validate(response_variable,presence_absence_features,k=5,use_adjusted=True,threshold=None)
-
-# Determine optimal threshold from cross validation results
-threshold = floodevent.performance_metrics['threshold'].mean()
+floodevent.cross_validate(response_variable,presence_absence_features,k=5,use_adjusted=True,threshold=threshold)
 
 # Predict presence/absence of flooding
 floodevent.predict_presence_absence(response_variable,presence_absence_features,use_adjusted=True,threshold=threshold)

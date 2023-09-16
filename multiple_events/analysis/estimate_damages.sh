@@ -7,7 +7,7 @@
 #SBATCH -t 1-00:00:00
 #SBATCH --mail-type=all
 #SBATCH --mail-user=kieranf@email.unc.edu
-#SBATCH --array=4-6
+#SBATCH --array=0-6
 
 cd /proj/characklab/flooddata/NC/multiple_events/analysis
 module purge
