@@ -35,11 +35,6 @@ class RegressionObject:
         """
         Fit a random forest regression model to the data
         """
-        # R parameters:
-        # mtry <- 6
-        # min.node.size <- 728
-        # sample.fraction <- 0.6295282
-
         self.model = RandomForestRegressor(max_depth=6)
         self.model.fit(self.x,self.y)
 
@@ -504,16 +499,20 @@ class FloodEvent:
             mod = RegressionObject(train_df,test_df,test_df,response_variable,features)
             mod.model_fit()
 
-            # Predict probabilities
-            y_pred = mod.model_predict(mod.x_test)
-
-            # Compute optimal classification threshold
-            y_true = mod.y_test
-
+            # If not already specified, calculate the optimal threshold based on
+            # training set (note that this includes pseudo-absences)
             if compute_threshold:
-                threshold = minimized_difference_threshold(y_pred,y_true)
+                y_pred_threshold = mod.model_predict(mod.x)
+                y_true_threshold = mod.y
+                threshold = minimized_difference_threshold(y_pred_threshold,y_true_threshold)
 
             results_dict['threshold'] = threshold
+
+            # Predict class probabilities for test set
+            y_pred = mod.model_predict(mod.x_test)
+
+            # Get actual class labels for test set
+            y_true = mod.y_test
 
             # Assign class labels to predictions
             y_class = mod.model_classify(mod.x_test,threshold)

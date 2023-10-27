@@ -216,9 +216,6 @@ end_date = event['end_date']
 peak_date = event['peak_date']
 event_name = event['name']
 
-# Specify probability threshold used to classify homes as flooded/non-flooded
-threshold=0.35
-
 # Process address-level data
 print(event_name,flush=True)
 
@@ -262,6 +259,9 @@ presence_absence_features = fp.remove_unnecessary_features(presence_absence_feat
 
 # Perform k-fold cross-validation
 floodevent.cross_validate(response_variable,presence_absence_features,k=5,use_adjusted=True,threshold=threshold)
+
+# Specify threshold based on CV results
+threshold = floodevent.performance_metrics['threshold'].mean()
 
 # Predict presence/absence of flooding
 floodevent.predict_presence_absence(response_variable,presence_absence_features,use_adjusted=True,threshold=threshold)
