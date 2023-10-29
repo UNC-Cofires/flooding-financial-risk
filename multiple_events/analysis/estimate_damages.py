@@ -258,7 +258,7 @@ presence_absence_features += huc_columns
 presence_absence_features = fp.remove_unnecessary_features(presence_absence_features,floodevent.training_dataset,max_corr=0.7)
 
 # Perform k-fold cross-validation
-floodevent.cross_validate(response_variable,presence_absence_features,k=5,use_adjusted=True,threshold=threshold)
+floodevent.cross_validate(response_variable,presence_absence_features,k=5,use_adjusted=True)
 
 # Specify threshold based on CV results
 threshold = floodevent.performance_metrics['threshold'].mean()
