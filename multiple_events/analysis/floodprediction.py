@@ -176,7 +176,7 @@ def minimized_difference_threshold(y_pred,y_true):
     TPR = np.vectorize(lambda x: confusion_matrix(y_pred,y_true,x)['TPR'])
     TNR = np.vectorize(lambda x: confusion_matrix(y_pred,y_true,x)['TNR'])
     abs_diff = lambda x: np.abs(TPR(x) - TNR(x))
-    threshold = y_pred[np.argmin(abs_diff(y_pred))]
+    threshold = y_pred[np.argmin(abs_diff(np.unique(y_pred)))]
 
     return(threshold)
 
@@ -190,7 +190,7 @@ def maximized_fbeta_threshold(y_pred,y_true,beta=1):
     param: beta: relative importance of recall vs precision
     """
     fbeta = np.vectorize(lambda x: metrics.fbeta_score(y_true, (y_pred > x).astype(int), beta=beta))
-    threshold = y_pred[np.argmax(fbeta(y_pred))]
+    threshold = y_pred[np.argmax(fbeta(np.unique(y_pred)))]
     return(threshold)
 
 # *** Flood event class for implementing data processing and prediction workflow
