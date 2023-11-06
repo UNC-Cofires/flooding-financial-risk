@@ -177,7 +177,20 @@ def minimized_difference_threshold(y_pred,y_true):
     TNR = np.vectorize(lambda x: confusion_matrix(y_pred,y_true,x)['TNR'])
     abs_diff = lambda x: np.abs(TPR(x) - TNR(x))
     threshold_vals = np.linspace(0,1,101)
-    threshold = y_pred[np.argmin(abs_diff(threshold_vals))]
+    threshold = threshold_vals[np.argmin(abs_diff(threshold_vals))]
+    return(threshold)
+
+def maximized_accuracy_threshold(y_pred,y_true):
+    """
+    Calculate the optimal threshold (cut-point) for classification that
+    maximized accuracy.
+
+    param: y_pred: numpy array of predicted class probabilities
+    param: y_true: numpy array of true class labels
+    """
+    accuracy = np.vectorize(lambda x: metrics.accuracy_score(y_true, (y_pred > x).astype(int)))
+    threshold_vals = np.linspace(0,1,101)
+    threshold = threshold_vals[np.argmax(accuracy(threshold_vals))]
     return(threshold)
 
 def maximized_fbeta_threshold(y_pred,y_true,beta=1):
@@ -191,7 +204,7 @@ def maximized_fbeta_threshold(y_pred,y_true,beta=1):
     """
     fbeta = np.vectorize(lambda x: metrics.fbeta_score(y_true, (y_pred > x).astype(int), beta=beta))
     threshold_vals = np.linspace(0,1,101)
-    threshold = y_pred[np.argmax(fbeta(threshold_vals))]
+    threshold = threshold_vals[np.argmax(fbeta(threshold_vals))]
     return(threshold)
 
 # *** Flood event class for implementing data processing and prediction workflow
