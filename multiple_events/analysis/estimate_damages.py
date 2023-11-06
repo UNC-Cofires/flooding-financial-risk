@@ -12,6 +12,11 @@ import floodprediction as fp
 # Specify current working directory
 pwd = os.getcwd()
 
+# Specify output directory for model runs
+outfolder = os.path.join(pwd,dt.datetime.today().strftime('%Y-%m-%d_%Hh-%Mm-%Ss_model_runs'))
+if not os.path.exists(outfolder):
+    os.makedirs(outfolder)
+
 # Get event-specific information
 eventlist_path = os.path.join(pwd,'flood_event_list.csv')
 eventlist = pd.read_csv(eventlist_path)
@@ -299,6 +304,6 @@ damage_cost_features = fp.remove_unnecessary_features(damage_cost_features,flood
 floodevent.predict_damage_cost('flood_damage','total_payout',damage_cost_features)
 
 ### *** SAVE RESULTS *** ###
-with open(f'{event_name}_FloodEvent.object','wb') as f:
+with open(os.path.join(outfolder,f'{event_name}_FloodEvent.object'),'wb') as f:
     pickle.dump(floodevent,f)
     f.close()
