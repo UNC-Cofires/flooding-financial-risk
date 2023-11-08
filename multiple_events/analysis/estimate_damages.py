@@ -13,9 +13,9 @@ import floodprediction as fp
 pwd = os.getcwd()
 
 # Specify output directory for model runs
-outfolder = os.path.join(pwd,dt.datetime.today().strftime('%Y-%m-%d_%Hh-%Mm-%Ss_model_runs'))
+outfolder = os.path.join(pwd,dt.datetime.today().strftime('%Y-%m-%d_model_runs'))
 if not os.path.exists(outfolder):
-    os.makedirs(outfolder)
+    os.makedirs(outfolder,exist_ok=True)
 
 # Get event-specific information
 eventlist_path = os.path.join(pwd,'flood_event_list.csv')
@@ -266,7 +266,8 @@ presence_absence_features = fp.remove_unnecessary_features(presence_absence_feat
 floodevent.cross_validate(response_variable,presence_absence_features,k=5,use_adjusted=True)
 
 # Specify threshold based on CV results
-threshold = floodevent.performance_metrics['threshold'].mean()
+threshold = floodevent.performance_metrics['threshold'].mean().round(2)
+print(f'Classification threshold: {threshold}')
 
 # Predict presence/absence of flooding
 floodevent.predict_presence_absence(response_variable,presence_absence_features,use_adjusted=True,threshold=threshold)

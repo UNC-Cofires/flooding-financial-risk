@@ -518,7 +518,7 @@ class FloodEvent:
             if compute_threshold:
                 y_pred_threshold = mod.model_predict(mod.x)
                 y_true_threshold = mod.y
-                threshold = minimized_difference_threshold(y_pred_threshold,y_true_threshold)
+                threshold = maximized_accuracy_threshold(y_pred_threshold,y_true_threshold)
 
             results_dict['threshold'] = threshold
 
