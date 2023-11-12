@@ -2,6 +2,7 @@ import numpy as np
 import scipy.stats as stats
 import scipy.integrate as si
 import scipy.optimize as so
+import sys
 
 class BivariateClayton:
 
@@ -329,7 +330,6 @@ class BivariateJoe:
         rho_s = 12*y
         return(rho_s)
 
-
 class BivariateGaussian:
 
     """
@@ -354,7 +354,9 @@ class BivariateGaussian:
         returns: probability density at point (u,v)
         """
         d = stats.norm()
-        return self.multivariate_normal_pdf(d.ppf(u),d.ppf(v))
+        x = d.ppf(u)
+        y = d.ppf(v)
+        return self.multivariate_normal_pdf(x,y)/(d.pdf(x)*d.pdf(y))
 
     def cdf(self,u,v):
         """
@@ -441,7 +443,9 @@ class BivariateStudentsT:
         returns: probability density at point (u,v)
         """
         d = stats.t(df=self.df)
-        return self.multivariate_t_pdf(d.ppf(u),d.ppf(v))
+        x = d.ppf(u)
+        y = d.ppf(v)
+        return self.multivariate_t_pdf(x,y)/(d.pdf(x)*d.pdf(y))
 
     def cdf(self,u,v):
         """
@@ -517,3 +521,323 @@ class BivariateStudentsT:
         """
         rho_s = 6/np.pi*np.arcsin(self.theta/2)
         return(rho_s)
+
+class ArchimedeanCopula:
+
+    """
+    Wrapper class for bivariate archimedean copulas that allows for rotation and negative depedence
+    """
+    def __init__(self,theta,family,rotation=0):
+        """
+        param: theta: dependence parameter
+        param: family: name of specific archimedean copula used to model dependence
+        param: rotation: modification of copula by rotating it by either 0, 90, 180, or 270 degrees
+        """
+        family_options = ['Clayton','Frank','Gumbel','Joe']
+        rotation_options = [0,90,180,270]
+
+        # Check that user input is in list of availabile archimedean copulas
+        if family not in family_options:
+            raise ValueError(f'Unrecognized copula family \'{family}\'. Must be one of '+', '.join(str(cf) for cf in family_options))
+        else:
+            family = 'Bivariate' + family
+
+        # Check that rotation is one of 0, 90, 180, 270
+        if rotation not in rotation_options:
+            raise ValueError(f'Unrecognized rotation \'{rotation}\'. Must be one of '+', '.join(str(r) for r in rotation_options))
+
+        self.theta=theta
+        self.family=family
+        self.rotation=rotation
+        self.copula = getattr(sys.modules[__name__],family)(theta=theta)
+
+        # Check that value of theta is within supported range
+        support = self.copula.support['theta']
+
+        # If value of theta is on edge of range, adjust by small number to avoid numerical problems down the road
+        smallnum = np.finfo(float).eps
+
+        if (theta < support[0]) or (theta > support[1]):
+            raise ValueError(f'Parameter theta must be between {support[0]} and {support[1]} for family {family}.')
+        elif (theta == support[0]):
+            self.copula = getattr(sys.modules[__name__],family)(theta=theta+smallnum)
+        elif (theta == support[1]):
+            self.copula = getattr(sys.modules[__name__],family)(theta=theta-smallnum)
+
+        # Specify mathematical functions for rotated copula as function of those for unrotated copula
+
+        if rotation == 0:
+            self.pdf = lambda u,v: self.copula.pdf(u,v)
+            self.cdf = lambda u,v: self.copula.cdf(u,v)
+            self.cdf_v_given_u = lambda u,v: self.copula.cdf_v_given_u(u,v)
+            self.inv_cdf_v_given_u = lambda u,p: self.copula.inv_cdf_v_given_u(u,p)
+            self.kendalls_tau = lambda: self.copula.kendalls_tau()
+            self.spearmans_rho = lambda: self.copula.spearmans_rho()
+
+        elif rotation == 90:
+            self.pdf = lambda u,v: self.copula.pdf(u,1-v)
+            self.cdf = lambda u,v: self.copula.cdf(u,1) - self.copula.cdf(u,1-v)
+            self.cdf_v_given_u = lambda u,v: self.copula.cdf_v_given_u(u,1) - self.copula.cdf_v_given_u(u,1-v)
+            self.inv_cdf_v_given_u = lambda u,p: 1 - self.copula.inv_cdf_v_given_u(u,1-p)
+            self.kendalls_tau = lambda: -1*self.copula.kendalls_tau()
+            self.spearmans_rho = lambda: -1*self.copula.spearmans_rho()
+
+        elif rotation == 180:
+            self.pdf = lambda u,v: self.copula.pdf(1-u,1-v)
+            self.cdf = lambda u,v: 1 - self.copula.cdf(1-u,1) - self.copula.cdf(1,1-v) + self.copula.cdf(1-u,1-v)
+            self.cdf_v_given_u = lambda u,v: self.copula.cdf_v_given_u(1-u,1) - self.copula.cdf_v_given_u(1-u,1-v)
+            self.inv_cdf_v_given_u = lambda u,p: 1 - self.copula.inv_cdf_v_given_u(1-u,1-p)
+            self.kendalls_tau = lambda: self.copula.kendalls_tau()
+            self.spearmans_rho = lambda: self.copula.spearmans_rho()
+
+        else:
+            self.pdf = lambda u,v: self.copula.pdf(1-u,v)
+            self.cdf = lambda u,v: self.copula.cdf(1,v) - self.copula.cdf(1-u,v)
+            self.cdf_v_given_u = lambda u,v: self.copula.cdf_v_given_u(1-u,v)
+            self.inv_cdf_v_given_u = lambda u,p: self.copula.inv_cdf_v_given_u(1-u,p)
+            self.kendalls_tau = lambda: -1*self.copula.kendalls_tau()
+            self.spearmans_rho = lambda: -1*self.copula.spearmans_rho()
+
+    def draw_v_given_u(self,u):
+        """
+        param: u: specified values of u
+        """
+        p = stats.uniform(loc=0,scale=1).rvs(size=u.shape)
+        v = self.inv_cdf_v_given_u(u,p)
+        return(v)
+
+    def draw_uv_pairs(self,n):
+        """
+        param: n: number of (u,v) pairs to draw
+        """
+        u = stats.uniform(loc=0,scale=1).rvs(size=n)
+        v = self.draw_v_given_u(u)
+        return(u,v)
+    
+    def log_likelihood(self,u,v,weights=None):
+        """
+        param: u: specified values of u
+        param: v: specified values of v
+        param: weights: vector of weights assigned to each (u,v) pair
+        returns: value of log-likelihood function
+        """
+        if weights is None:
+            weights=np.ones(len(u))
+        
+        LL = np.sum(weights*np.log(self.pdf(u,v)))
+        return(LL)
+
+class GaussianCopula(BivariateGaussian):
+    """
+    Child class for bivariate gaussian copula that includes some checks for user input
+    """
+    def __init__(self,theta):
+
+        smallnum = np.finfo(float).eps
+
+        if (theta < -1) or (theta > 1):
+            raise ValueError('Parameter theta must be between -1 and 1.')
+        elif theta == -1:
+            theta = theta + smallnum
+        elif theta == 1:
+            theta = theta - smallnum
+
+        # Call initialization procedures of parent class
+        BivariateGaussian.__init__(self, theta)
+        
+    def log_likelihood(self,u,v,weights=None):
+        """
+        param: u: specified values of u
+        param: v: specified values of v
+        param: weights: vector of weights assigned to each (u,v) pair
+        returns: value of log-likelihood function
+        """
+        if weights is None:
+            weights=np.ones(len(u))
+        
+        LL = np.sum(weights*np.log(self.pdf(u,v)))
+        return(LL)
+
+class StudentsTCopula(BivariateStudentsT):
+    """
+    Child class for bivariate t-copula that includes some checks for user input
+    """
+    def __init__(self,theta,df):
+
+        smallnum = np.finfo(float).eps
+
+        if (theta < -1) or (theta > 1):
+            raise ValueError('Parameter theta must be between -1 and 1.')
+        elif theta == -1:
+            theta = theta + smallnum
+        elif theta == 1:
+            theta = theta - smallnum
+
+        if (df < 0):
+            raise ValueError('Parameter df must be greater than zero')
+        elif df == 0:
+            df = df+smallnum
+
+        # Call initialization procedures of parent class
+        BivariateStudentsT.__init__(self, theta, df)
+        
+    def log_likelihood(self,u,v,weights=None):
+        """
+        param: u: specified values of u
+        param: v: specified values of v
+        param: weights: vector of weights assigned to each (u,v) pair
+        returns: value of log-likelihood function
+        """
+        if weights is None:
+            weights=np.ones(len(u))
+        
+        LL = np.sum(weights*np.log(self.pdf(u,v)))
+        return(LL)
+    
+def best_fit_archimedean_copula(u,v,weights=None):
+    """
+    Determine the best-fit Archimedean copula based on maximum likelihood estimation.
+    
+    param: u: specified values of u
+    param: v: specified values of v
+    param: weights: vector of weights assigned to each (u,v) pair
+    """
+    
+    smallnum = 1e-6
+    family_options = ['Clayton','Frank','Gumbel','Joe']
+    family_support = [[0,50],[0,25],[1,50],[1,50]]
+    rotation_options = [0,90,180,270]
+    
+    best_family = family_options[0]
+    best_rotation = rotation_options[0]
+    best_likelihood = -np.inf
+    best_theta = None
+    
+    for i,family in enumerate(family_options):
+        for rotation in rotation_options:
+            
+            bounds = family_support[i]
+            bounds[0] = bounds[0] + smallnum
+            bounds[1] = bounds[1] - smallnum
+            initial_guess = np.mean(bounds)
+            
+            # Find theta that maximizes log-likelihood for given copula
+            obj_fun = lambda theta: -1*ArchimedeanCopula(theta=theta,family=family,rotation=rotation).log_likelihood(u,v,weights=weights)
+            res = so.minimize_scalar(obj_fun,initial_guess,bounds=bounds)
+            
+            theta_fit = res.x
+            LL = -1*res.fun
+            
+            #print(f'{family} {rotation} {np.round(theta_fit,2)} {np.round(LL,2)}')
+            
+            if LL > best_likelihood:
+                            
+                best_family = family
+                best_rotation = rotation
+                best_likelihood = LL
+                best_theta = theta_fit
+                
+    print(f'Best fit Archimedean copula: {best_family}(theta={np.round(best_theta,2)}, rotation={best_rotation})')
+    print(f'Log-likelihood: {np.round(best_likelihood,2)}\n')
+    c = ArchimedeanCopula(theta=best_theta,family=best_family,rotation=best_rotation)
+    extra = [best_likelihood,best_theta,best_family,best_rotation]
+    return(c,extra)
+
+def best_fit_elliptical_copula(u,v,weights=None):
+    """
+    Determine the best-fit elliptical copula based on maximum likelihood estimation.
+    
+    param: u: specified values of u
+    param: v: specified values of v
+    param: weights: vector of weights assigned to each (u,v) pair
+    """
+    smallnum = 1e-6
+    
+    # First try fitting gaussian copula
+    bounds = [-1+smallnum,1-smallnum]
+    initial_guess = 0.0
+
+    # Find theta that maximizes log-likelihood for given copula
+    obj_fun = lambda theta: -1*GaussianCopula(theta).log_likelihood(u,v,weights=weights)
+    res = so.minimize_scalar(obj_fun,initial_guess,bounds=bounds)
+
+    theta_fit = res.x
+    LL = -1*res.fun
+    
+    best_family = 'Gaussian'
+    best_df = None
+    best_likelihood = LL
+    best_theta = theta_fit
+    
+    # Also try Student's t-distribution
+    # Note that variance undefined for df < 3
+    # And anything with df >= 30 is approximately gaussian
+    # If no noticable improvement by reducing df, stop process early
+    
+    num_failures = 0
+    
+    for df in range(5,2,-1):
+        
+        # Find theta that maximizes log-likelihood for given copula
+        obj_fun = lambda theta: -1*StudentsTCopula(theta,df).log_likelihood(u,v,weights=weights)
+        res = so.minimize_scalar(obj_fun,initial_guess,bounds=bounds)
+            
+        theta_fit = res.x
+        LL = -1*res.fun
+                    
+        if LL > best_likelihood:
+            best_family = 'StudentsT'            
+            best_df = df
+            best_likelihood = LL
+            best_theta = theta_fit
+            
+            num_failures = 0
+        else:
+            num_failures += 1
+            
+        if num_failures >= 3:
+            break
+    
+    if best_family == 'Gaussian':
+        print(f'Best fit elliptical copula: {best_family}(theta={np.round(best_theta,2)})')
+        print(f'Log-likelihood: {np.round(best_likelihood,2)}\n')
+        c = GaussianCopula(best_theta)
+    else:
+        print(f'Best fit elliptical copula: {best_family}(theta={np.round(best_theta,2)}, df={best_df})')
+        print(f'Log-likelihood: {np.round(best_likelihood,2)}\n')
+        c = StudentsTCopula(best_theta,best_df)
+        
+    extra = [best_likelihood,best_theta,best_family,best_df]
+            
+    return(c,extra)
+
+def best_fit_copula(u,v,weights=None):
+    """
+    Determine the best-fit copula based on maximum likelihood estimation. 
+    
+    param: u: specified values of u
+    param: v: specified values of v
+    param: weights: vector of weights assigned to each (u,v) pair
+    """
+    
+    c1,extra1 = best_fit_archimedean_copula(u,v,weights=weights)
+    c2,extra2 = best_fit_elliptical_copula(u,v,weights=weights)
+    
+    if extra1[0] >= extra2[0]:
+        c = c1
+        extra = extra2
+        best_likelihood,best_theta,best_family,best_rotation = extra1
+        print(f'Best fit copula: {best_family}(theta={np.round(best_theta,2)}, rotation={best_rotation})')
+        print(f'Log-likelihood: {np.round(best_likelihood,2)}\n')
+    else:
+        c = c2
+        extra = extra2
+        best_likelihood,best_theta,best_family,best_df = extra2
+        if best_family == 'StudentsT':
+            print(f'Best fit copula: {best_family}(theta={np.round(best_theta,2)}, df={best_df})')
+        else:
+            print(f'Best fit copula: {best_family}(theta={np.round(best_theta,2)})')
+            
+        print(f'Log-likelihood: {np.round(best_likelihood,2)}\n')
+        
+    return(c,extra)
