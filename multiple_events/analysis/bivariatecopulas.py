@@ -776,7 +776,7 @@ def best_fit_elliptical_copula(u,v,weights=None):
     
     num_failures = 0
     
-    for df in range(5,2,-1):
+    for df in range(29,2,-1):
         
         # Find theta that maximizes log-likelihood for given copula
         obj_fun = lambda theta: -1*StudentsTCopula(theta,df).log_likelihood(u,v,weights=weights)
@@ -795,7 +795,7 @@ def best_fit_elliptical_copula(u,v,weights=None):
         else:
             num_failures += 1
             
-        if num_failures >= 3:
+        if num_failures >= 5:
             break
     
     if best_family == 'Gaussian':
