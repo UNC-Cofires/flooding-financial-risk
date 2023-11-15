@@ -2,6 +2,7 @@ import numpy as np
 import scipy.stats as stats
 import scipy.integrate as si
 import scipy.optimize as so
+import scipy.interpolate as interp
 import sys
 
 class BivariateClayton:
@@ -694,6 +695,30 @@ class StudentsTCopula(BivariateStudentsT):
         LL = np.sum(weights*np.log(self.pdf(u,v)))
         return(LL)
     
+def weighted_empirical_cdf(x,weights=None):
+    """
+    Return an empirical cumulative distribution function (CDF)
+    and inverse CDF based on weighted samples of data. 
+    
+    param: x: sampled values of x
+    param: weights: weights associated with sampled values of x
+    """
+    
+    if weights is None:
+        weights = np.ones(len(x))
+    
+    sort_inds = np.argsort(x)
+    x = x[sort_inds]
+    weights = weights[sort_inds]
+    
+    # For weighted CDF, Pr(X <= x) = sum(weights[X <= x])
+    F = np.cumsum(weights)/np.sum(weights)
+    
+    cdf = interp.interp1d(x,F,kind='linear',fill_value=(0,1))
+    inv_cdf = interp.interp1d(F,x,kind='linear',bounds_error=True)
+    
+    return(cdf,inv_cdf)
+    
 def best_fit_archimedean_copula(u,v,weights=None):
     """
     Determine the best-fit Archimedean copula based on maximum likelihood estimation.
@@ -771,32 +796,41 @@ def best_fit_elliptical_copula(u,v,weights=None):
     
     # Also try Student's t-distribution
     # Note that variance undefined for df < 3
-    # And anything with df >= 30 is approximately gaussian
-    # If no noticable improvement by reducing df, stop process early
+    # And anything with df > 30 is approximately gaussian
     
-    num_failures = 0
+    # First perform optimization to find combo of theta and df that maximizes likelihood
+    obj_fun = lambda params: -1*StudentsTCopula(params[0],params[1]).log_likelihood(u,v,weights=weights)
+    initial_guess = [0,4]
+    bounds = [[-1+smallnum,1-smallnum],[3,10]]
+    res = so.minimize(obj_fun,initial_guess,bounds=bounds)
+    theta_fit = res.x[0]
+    df_fit = res.x[1]
+    LL = -1*res.fun
+    keepgoing = LL > best_likelihood
     
-    for df in range(29,2,-1):
+    # After finding best-fit degrees of freedom, perform a second optimization 
+    # but enforcing df as an integer if it looks like student's t distribution is promising
+    
+    if keepgoing:
         
-        # Find theta that maximizes log-likelihood for given copula
-        obj_fun = lambda theta: -1*StudentsTCopula(theta,df).log_likelihood(u,v,weights=weights)
-        res = so.minimize_scalar(obj_fun,initial_guess,bounds=bounds)
-            
-        theta_fit = res.x
-        LL = -1*res.fun
-                    
-        if LL > best_likelihood:
-            best_family = 'StudentsT'            
-            best_df = df
-            best_likelihood = LL
-            best_theta = theta_fit
-            
-            num_failures = 0
-        else:
-            num_failures += 1
-            
-        if num_failures >= 5:
-            break
+        df_low = np.floor(df_fit).astype(int)
+        df_high = np.ceil(df_fit).astype(int)
+        bounds = [-1+smallnum,1-smallnum]
+        initial_guess = 0.0
+
+        for df in [df_low,df_high]:
+            # Find theta that maximizes log-likelihood for given copula
+            obj_fun = lambda theta: -1*StudentsTCopula(theta,df).log_likelihood(u,v,weights=weights)
+            res = so.minimize_scalar(obj_fun,initial_guess,bounds=bounds)
+
+            theta_fit = res.x
+            LL = -1*res.fun
+
+            if LL > best_likelihood:
+                best_family = 'StudentsT'            
+                best_df = df
+                best_likelihood = LL
+                best_theta = theta_fit
     
     if best_family == 'Gaussian':
         print(f'Best fit elliptical copula: {best_family}(theta={np.round(best_theta,2)})')
