@@ -7,27 +7,30 @@ import sklearn.metrics as metrics
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import KFold
 from scipy.interpolate import interp1d
+import time
 
 # *** Class for performing Random Forest regression on arbitrary data ***
 
 class RegressionObject:
 
-    def __init__(self,train_df,test_df,target_df,response_variable,features):
+    def __init__(self,train_df,test_df,target_df,response_variable,features,n_cores=1):
         """
         param: train_df: pandas dataframe of training data (m x n+1)
         param: test_df: pandas dataframe of validation data (m x n+1)
         param: target_df: pandas dataframe of target data (z x n)
         param: response_variable: name of response variable
         param: features: list of predictors (n)
+        param: n_cores: number of threads to use for parallelization of model
         """
         self.features = [f for f in features if f != response_variable and f != train_df.index.name]
         self.response_variable = response_variable
         self.x = train_df[self.features].to_numpy()
-        self.y = train_df[response_variable].to_numpy()
+        self.y = train_df[self.response_variable].to_numpy()
         self.x_test = test_df[self.features].to_numpy()
         self.y_test = test_df[self.response_variable].to_numpy()
         self.x_target = target_df[self.features].to_numpy()
         self.model = None
+        self.n_cores = n_cores
 
         return(None)
 
@@ -35,7 +38,7 @@ class RegressionObject:
         """
         Fit a random forest regression model to the data
         """
-        self.model = RandomForestRegressor(max_depth=6)
+        self.model = RandomForestRegressor(max_depth=5,n_jobs=self.n_cores)
         self.model.fit(self.x,self.y)
 
         return(None)
@@ -207,6 +210,119 @@ def maximized_fbeta_threshold(y_pred,y_true,beta=1):
     threshold = threshold_vals[np.argmax(fbeta(threshold_vals))]
     return(threshold)
 
+# Helper function to format elapsed time in seconds
+def format_elapsed_time(seconds):
+    seconds = int(np.round(seconds))
+    hours = seconds // 3600
+    seconds = seconds - hours*3600
+    minutes = seconds // 60
+    seconds = seconds - minutes*60
+    return(f'{hours}h:{minutes:02d}m:{seconds:02d}s')
+
+# Cross validation setup
+def cv_fold(fold,train_df,test_df,presence_response_variable,presence_features,cost_response_variable,cost_features,n_cores=1):
+        """
+        param: fold: fold number
+        param: train_df: training data
+        param: test_df: testing data
+        param: presence_response_variable: name of binary response variable indicating presence/absence of flooding
+        param: presence_features: list of features used to predict the presence/absence of flood damage
+        param: cost_response_variable: name of continuous variable indicating cost of damages
+        param: cost_features: list of features used to predict the cost of damage to flooded structures
+        param: n_cores: number of cores to use if running tasks in parallel
+        """
+        
+        results_dict = {'fold':fold}
+        test_df['fold'] = fold
+        
+        fpr_viz_vals = np.linspace(0,1,501)
+        rec_viz_vals = np.linspace(0,1,501)
+        
+        # Fit prediction model for presence/absence of flooding
+        presence_mod = RegressionObject(train_df,test_df,test_df,presence_response_variable,presence_features,n_cores=n_cores)
+        presence_mod.model_fit()
+        
+        # If not already specified, calculate the optimal threshold based on
+        # the training set (note that this includes pseudo-absences)
+        y_pred_threshold = presence_mod.model_predict(presence_mod.x)
+        y_true_threshold = presence_mod.y
+        threshold = maximized_accuracy_threshold(y_pred_threshold,y_true_threshold)        
+        results_dict['threshold'] = threshold
+        
+        # Predict presence/absence for test set
+        y_pred = presence_mod.model_predict(presence_mod.x_test)
+
+        # Get actual class labels for test set
+        y_true = presence_mod.y_test
+
+        # Assign class labels to predictions
+        y_class = presence_mod.model_classify(presence_mod.x_test,threshold)
+        
+        # Add predictions to dataset
+        test_df[f'{presence_response_variable}_prob'] = y_pred
+        test_df[f'{presence_response_variable}_class'] = y_class
+        
+        # Fit prediction model for cost of damage among flooded homes
+        cost_train_df = train_df[train_df[presence_response_variable]==1]
+        cost_mod = RegressionObject(cost_train_df,test_df,test_df,cost_response_variable,cost_features,n_cores=n_cores)
+        cost_mod.model_fit()
+        
+        # Predict cost of flood damage among buildings in test set
+        c_pred = cost_mod.model_predict(cost_mod.x_test)
+        
+        # Assume buildings classified as non-flooded don't incur damage costs
+        c_pred = y_class*c_pred 
+        
+        # Get actual cost of flood damage for test set
+        c_true = cost_mod.y_test
+        
+        # Add predictions to dataset
+        test_df[f'{cost_response_variable}_pred'] = c_pred
+        
+        # Compute performance metrics
+
+        # Threshold-independent metrics
+        results_dict['roc_auc'] = metrics.roc_auc_score(y_true,y_pred)
+        results_dict['avg_prec'] = metrics.average_precision_score(y_true,y_pred)
+        results_dict['bs_loss'] = metrics.brier_score_loss(y_true,y_pred)
+        results_dict['log_loss'] = metrics.log_loss(y_true,y_pred)
+
+        # Threshold-dependent metrics
+        results_dict['accuracy'] = metrics.accuracy_score(y_true,y_class)
+        results_dict['balanced_accuracy'] = metrics.balanced_accuracy_score(y_true,y_class)
+        results_dict['f1_score'] = metrics.f1_score(y_true,y_class)
+        tn, fp, fn, tp = metrics.confusion_matrix(y_true, y_class).ravel()
+        results_dict['sensitivity'] = tp/(tp + fn)
+        results_dict['specificity'] = tn/(tn + fp)
+        results_dict['precision'] = tp/(tp + fp)
+        
+        # Metrics related to damage cost estimation
+        residuals = c_true - c_pred
+        
+        SSE = np.sum(residuals**2)
+        SST = np.sum((c_true - np.mean(c_true))**2)
+        R_sq = 1 - SSE/SST
+        MAE = np.mean(np.abs(residuals))
+        RMSE = np.sqrt(np.mean(residuals**2))
+        results_dict['damage_cost_Rsq'] = R_sq
+        results_dict['damage_cost_MAE'] = MAE
+        results_dict['damage_cost_RMSE'] = RMSE
+        
+        # Get data needed for ROC and PR curves
+        fpr_vals, tpr_vals, threshold_vals = metrics.roc_curve(y_true, y_pred)
+        roc_interp_func = interp1d(fpr_vals,tpr_vals)
+        tpr_viz_vals = roc_interp_func(fpr_viz_vals)
+        roc_df = pd.DataFrame({'fpr':fpr_viz_vals,'tpr':tpr_viz_vals})
+        roc_df['fold'] = fold 
+
+        prec_vals, rec_vals, threshold_vals = metrics.precision_recall_curve(y_true, y_pred)
+        pr_interp_func = interp1d(rec_vals,prec_vals)
+        prec_viz_vals = pr_interp_func(rec_viz_vals)
+        pr_df = pd.DataFrame({'rec':rec_viz_vals,'prec':prec_viz_vals})
+        pr_df['fold'] = fold 
+            
+        return([test_df,results_dict,roc_df,pr_df])
+
 # *** Flood event class for implementing data processing and prediction workflow
 
 class FloodEvent:
@@ -275,6 +391,9 @@ class FloodEvent:
         claims['Date_of_Loss'] = pd.to_datetime(claims['Date_of_Loss']).dt.tz_localize(None)
         policies['Policy_Effective_Date'] = pd.to_datetime(policies['Policy_Effective_Date']).dt.tz_localize(None)
         policies['Policy_Expiration_Date'] = pd.to_datetime(policies['Policy_Expiration_Date']).dt.tz_localize(None)
+        
+        # Adjust damages for inflation
+        claims['total_cost'] = claims['total_cost']*inflation_multiplier
 
         # Get ids of buildings in study area
         buildings_filter = buildings.intersects(self.auxiliary_area)
@@ -294,8 +413,10 @@ class FloodEvent:
         claims_filter = (claims['building_id'].isin(included_building_ids))
         claims_filter = claims_filter&(claims['Date_of_Loss'] >= self.start_date)
         claims_filter = claims_filter&(claims['Date_of_Loss'] <= self.end_date)
-        claims_filter = claims_filter&(claims['Net_Total_Payments'] > 0.0)
-        flooded_building_ids = claims[claims_filter]['building_id'].unique()
+        claims_filter = claims_filter&(claims['total_cost'] > 0.0)
+        payouts_by_building = claims[claims_filter][['building_id','total_cost']].groupby('building_id').max().reset_index()
+        flooded_building_ids = payouts_by_building['building_id'].values
+        flood_cost = payouts_by_building['total_cost'].values
 
         # Get ids of buildings in study area that had a policy but no playout during study period
         # (for simplicity, define active policies based on peak date of event)
@@ -315,15 +436,17 @@ class FloodEvent:
         flood_status = np.ones(flooded_building_ids.shape)
         nonflood_status = np.zeros(nonflooded_building_ids.shape)
         inconclusive_status = np.ones(inconclusive_building_ids.shape)*np.nan
+        
+        nonflood_cost = np.zeros(nonflooded_building_ids.shape)
+        inconclusive_cost = np.ones(inconclusive_building_ids.shape)*np.nan
 
         event_building_ids = np.concatenate((flooded_building_ids,nonflooded_building_ids,inconclusive_building_ids))
         event_damage_status = np.concatenate((flood_status,nonflood_status,inconclusive_status))
-
-        # Adjust damages for inflation
-        claims['total_payout'] = claims['total_payout']*inflation_multiplier
+        event_damage_cost = np.concatenate((flood_cost,nonflood_cost,inconclusive_cost))
 
         # Store properties of flood event
-        self.flood_damage_status = pd.DataFrame(data={'building_id':event_building_ids,'flood_damage':event_damage_status})
+        self.flood_damage_status = pd.DataFrame(data={'building_id':event_building_ids,'flood_damage':event_damage_status,'total_cost':event_damage_cost})
+        #self.flood_damage_status = pd.merge(self.flood_damage_status,payouts_by_building,how='left',on='building_id')
         self.parcels = parcels[parcels_filter]
         self.buildings = buildings[buildings_filter]
         self.claims = claims[claims_filter]
@@ -351,7 +474,7 @@ class FloodEvent:
         # Get claims with non-zero payout associated with dates of event
         claims_filter = (auxiliary_claims['dateOfLoss'] >= self.start_date)
         claims_filter = claims_filter&(auxiliary_claims['dateOfLoss'] <= self.end_date)
-        claims_filter = claims_filter&(auxiliary_claims['total_payout'] > 0.0)
+        claims_filter = claims_filter&(auxiliary_claims['total_cost'] > 0.0)
         auxiliary_claims = auxiliary_claims[claims_filter]
 
         # Get policies in force during time of event
@@ -369,7 +492,7 @@ class FloodEvent:
         auxiliary_claims['claimCount'] = 1
 
         # Adjust damages for inflation
-        auxiliary_claims['total_payout'] = auxiliary_claims['total_payout']*inflation_multiplier
+        auxiliary_claims['total_cost'] = auxiliary_claims['total_cost']*inflation_multiplier
 
         self.auxiliary_claims = auxiliary_claims
         self.auxiliary_policies = auxiliary_policies
@@ -436,6 +559,7 @@ class FloodEvent:
             pseudo_absences = potential_pseudo_absences.groupby('strata',group_keys=False).apply(sampling_func)
             pseudo_absences['pseudo_absence'] = True
             pseudo_absences['flood_damage'] = 0
+            pseudo_absences['total_cost'] = 0
             df_list.append(existing_data)
             df_list.append(pseudo_absences)
 
@@ -459,282 +583,139 @@ class FloodEvent:
         self.target_dataset = self.target_dataset[self.target_dataset['study_area']==1].reset_index(drop=True)
         return(None)
 
-    def cross_validate(self,response_variable,features,k=5,use_adjusted=True,threshold=None):
+    def random_cross_validation(self,presence_response_variable,presence_features,cost_response_variable,cost_features,use_adjusted=True,k=5,n_cores=1):
         """
-        param: response_variable: name of response variable
-        param: features: list of predictors
-        param: k: number of k-fold cross validation iterations to perform
+        param: presence_response_variable: name of binary response variable indicating presence/absence of flooding
+        param: presence_features: list of features used to predict the presence/absence of flood damage
+        param: cost_response_variable: name of continuous variable indicating cost of damages
+        param: cost_features: list of features used to predict the cost of damage to flooded structures
         param: use_adjusted: if true, train models using adjusted training data which includes pseudo-absences
-                            (note that we still test on genuine observations)
-        param: threshold: probability threshold used for classification
+        param: k: number of k-fold cross validation iterations to perform
+        param: n_cores: number of cores to use if running tasks in parallel
         """
+        
+        print(f'*** {k}-fold cross validation (random) ***',flush=True)
 
-        features = [f for f in features if f != response_variable]
         kf = KFold(n_splits=k,random_state=None,shuffle=True)
-
-        if threshold is None:
-            compute_threshold = True
+        
+        if use_adjusted:
+            data = self.adjusted_training_dataset
         else:
-            compute_threshold = False
-
+            data = self.training_dataset
+            
+        predictions_list = []
         results_list = []
+        roc_list = []
+        pr_list = []
+        
+        t0 = time.time()
+            
+        for i,(train_indices,test_indices) in enumerate(kf.split(data)):
+            
+            t1 = time.time()
+            
+            train_df = data.iloc[train_indices].copy()
+            test_df = data.iloc[test_indices].copy()
+            
+            predictions,results_dict,roc_curve,pr_curve = cv_fold(i,train_df,test_df,presence_response_variable,presence_features,cost_response_variable,cost_features,n_cores=n_cores)
 
-        fpr_viz_vals = np.linspace(0,1,501)
-        tpr_viz_vals = np.zeros((k,fpr_viz_vals.shape[0]))
-        roc_labels = []
-
-        rec_viz_vals = np.linspace(0,1,501)
-        prec_viz_vals = np.zeros((k,rec_viz_vals.shape[0]))
-        pr_labels = []
-
-        for i,(train_indices,test_indices) in enumerate(kf.split(self.training_dataset)):
-
-            results_dict = {'fold':i}
-
-            test_df = self.training_dataset.iloc[test_indices].copy()
-
-            if use_adjusted:
-
-                # Exclude buildings included in test set from training data
-                test_building_ids = test_df['building_id']
-                m1 = self.adjusted_training_dataset['building_id'].isin(test_building_ids)
-
-                # Randomly drop 1/k of pseudo-absences to maintain balance
-                m2 = self.adjusted_training_dataset['pseudo_absence']
-                m3 = np.random.rand(len(self.adjusted_training_dataset)) < 1/k
-
-                records_to_drop = m1|(m2&m3)
-                train_df = self.adjusted_training_dataset[~records_to_drop].copy()
-
-            else:
-                train_df = self.training_dataset.iloc[train_indices].copy()
-
-            # Fit model
-            mod = RegressionObject(train_df,test_df,test_df,response_variable,features)
-            mod.model_fit()
-
-            # If not already specified, calculate the optimal threshold based on
-            # training set (note that this includes pseudo-absences)
-            if compute_threshold:
-                y_pred_threshold = mod.model_predict(mod.x)
-                y_true_threshold = mod.y
-                threshold = maximized_accuracy_threshold(y_pred_threshold,y_true_threshold)
-
-            results_dict['threshold'] = threshold
-
-            # Predict class probabilities for test set
-            y_pred = mod.model_predict(mod.x_test)
-
-            # Get actual class labels for test set
-            y_true = mod.y_test
-
-            # Assign class labels to predictions
-            y_class = mod.model_classify(mod.x_test,threshold)
-
-            # Compute performance metrics
-
-            # Threshold-independent metrics
-            results_dict['roc_auc'] = metrics.roc_auc_score(y_true,y_pred)
-            results_dict['avg_prec'] = metrics.average_precision_score(y_true,y_pred)
-            results_dict['bs_loss'] = metrics.brier_score_loss(y_true,y_pred)
-            results_dict['log_loss'] = metrics.log_loss(y_true,y_pred)
-
-            # Threshold-dependent metrics
-            results_dict['accuracy'] = metrics.accuracy_score(y_true,y_class)
-            results_dict['balanced_accuracy'] = metrics.balanced_accuracy_score(y_true,y_class)
-            results_dict['f1_score'] = metrics.f1_score(y_true,y_class)
-            tn, fp, fn, tp = metrics.confusion_matrix(y_true, y_class).ravel()
-            results_dict['sensitivity'] = tp/(tp + fn)
-            results_dict['specificity'] = tn/(tn + fp)
-            results_dict['precision'] = tp/(tp + fp)
-
-            # Get data needed for ROC and PR curves
-            fpr_vals, tpr_vals, threshold_vals = metrics.roc_curve(y_true, y_pred)
-            roc_interp_func = interp1d(fpr_vals,tpr_vals)
-            tpr_viz_vals[i,:] = roc_interp_func(fpr_viz_vals)
-            auc_rounded = np.round(results_dict['roc_auc'],2)
-            roc_labels.append(f'CV fold {i+1} (AUC={auc_rounded})')
-
-            prec_vals, rec_vals, threshold_vals = metrics.precision_recall_curve(y_true, y_pred)
-            pr_interp_func = interp1d(rec_vals,prec_vals)
-            prec_viz_vals[i,:] = pr_interp_func(rec_viz_vals)
-            ap_rounded = np.round(results_dict['avg_prec'],2)
-            pr_labels.append(f'CV fold {i+1} (AP={ap_rounded})')
-
-            results_list.append(results_dict.copy())
+            predictions_list.append(predictions)
+            results_list.append(results_dict)
+            roc_list.append(roc_curve)
+            pr_list.append(pr_curve)
+            
+            t2 = time.time()
+            
+            elapsed_time = format_elapsed_time(t2-t1)
+            cumulative_elapsed_time = format_elapsed_time(t2-t0)
+            
+            print(f'CV fold {i+1} / {k} (time elapsed: {elapsed_time} last iteration / {cumulative_elapsed_time} cumulative)',flush=True)
 
         # Save performance metrics in dataframe
+        predictions_df = pd.concat(predictions_list)
         results_df = pd.DataFrame(results_list)
-
-        # Create ROC curve plot
-        roc_mean = np.round(results_df['roc_auc'].mean(),2)
-        roc_std = np.round(results_df['roc_auc'].std(),2)
-
-        tpr_mean = tpr_viz_vals.mean(axis=0)
-        tpr_std = tpr_viz_vals.std(axis=0)
-
-        roc_fig,ax = plt.subplots(nrows=1,ncols=1,figsize=(6,6))
-        ax.set_aspect('equal', adjustable='box')
-
-        for i in range(k):
-            ax.plot(fpr_viz_vals,tpr_viz_vals[i],alpha=0.65,label=roc_labels[i])
-
-        ax.plot(fpr_viz_vals,tpr_mean,'k',lw=2,label=f'Mean ROC (AUC={roc_mean}±{roc_std})')
-        ax.fill_between(fpr_viz_vals, tpr_mean - tpr_std, tpr_mean + tpr_std,color='gray',alpha=0.2,label=f'±1 std. dev.')
-        ax.plot([0,1],[0,1],'k--',alpha=0.65,label='Random classifier (AUC=0.5)')
-
-        ax.set_xlim([0,1])
-        ax.set_ylim([0,1])
-
-        ax.set_xlabel('False positive rate')
-        ax.set_ylabel('True positive rate')
-        ax.set_title('Receiver operating characteristic (ROC) curve')
-
-        ax.legend()
-        roc_fig.tight_layout()
-
-        # Create PR curve plot
-
-        pr_mean = np.round(results_df['avg_prec'].mean(),2)
-        pr_std = np.round(results_df['avg_prec'].std(),2)
-
-        prec_mean = prec_viz_vals.mean(axis=0)
-        prec_std = prec_viz_vals.std(axis=0)
-
-        pr_random = np.round(self.training_dataset[response_variable].mean(),2)
-
-        pr_fig,ax = plt.subplots(nrows=1,ncols=1,figsize=(6,6))
-
-        for i in range(k):
-            ax.plot(rec_viz_vals,prec_viz_vals[i],alpha=0.65,label=pr_labels[i])
-
-        ax.plot(rec_viz_vals,prec_mean,'k',lw=2,label=f'Mean PR (AP={pr_mean}±{pr_std})')
-        ax.fill_between(rec_viz_vals, prec_mean - prec_std, prec_mean + prec_std,color='gray',alpha=0.2,label=f'±1 std. dev.')
-        ax.plot([0,1],[pr_random,pr_random],'k--',alpha=0.65,label=f'Random classifier (AP={pr_random})')
-
-        ax.set_xlim([0,1])
-        ax.set_ylim([None,1])
-
-        ax.set_xlabel('Recall')
-        ax.set_ylabel('Precision')
-        ax.set_title('Precision-Recall (PR) curve')
-
-        ax.legend()
-        pr_fig.tight_layout()
-
-        self.performance_metrics = results_df
-        self.roc_curve = roc_fig
-        self.pr_curve = pr_fig
+        roc_curve_df = pd.concat(roc_list)
+        pr_curve_df = pd.concat(pr_list)
+        
+        self.random_cv_predictions = predictions_df
+        self.random_cv_performance_metrics = results_df
+        self.random_cv_roc_curve = roc_curve_df
+        self.random_cv_pr_curve = pr_curve_df
 
         return(None)
-
-    def predict_presence_absence(self,response_variable,features,use_adjusted=True,threshold=0.5):
+    
+    def predict_flood_damage(self,presence_response_variable,presence_features,cost_response_variable,cost_features,use_adjusted=True,n_cores=1):
         """
-        Predict the presence/absence of flooding at target locations.
-
-        param: response_variable: name of response variable
-        param: features: list of predictors
+        param: presence_response_variable: name of binary response variable indicating presence/absence of flooding
+        param: presence_features: list of features used to predict the presence/absence of flood damage
+        param: cost_response_variable: name of continuous variable indicating cost of damages
+        param: cost_features: list of features used to predict the cost of damage to flooded structures
         param: use_adjusted: if true, train models using adjusted training data which includes pseudo-absences
-                            (note that we still test on genuine observations)
-        param: threshold: probability threshold used for classification
+        param: n_cores: number of cores to use if running tasks in parallel
         """
-
         if use_adjusted:
-            mod = RegressionObject(self.adjusted_training_dataset,self.adjusted_training_dataset,self.target_dataset,response_variable,features)
+            presence_mod = RegressionObject(self.adjusted_training_dataset,self.adjusted_training_dataset,self.target_dataset,presence_response_variable,presence_features,n_cores=n_cores)
         else:
-            mod = RegressionObject(self.training_dataset,self.training_dataset,self.target_dataset,response_variable,features)
-
-        # Fit Random Forest model
-        mod.model_fit()
-
+            presence_mod = RegressionObject(self.training_dataset,self.training_dataset,self.target_dataset,presence_response_variable,presence_features,n_cores=n_cores)
+        
+        presence_mod.model_fit()
+        
+        # Determine maximum accuracy threshold based on training data
+        y_pred_threshold = presence_mod.model_predict(presence_mod.x)
+        y_true_threshold = presence_mod.y
+        threshold = maximized_accuracy_threshold(y_pred_threshold,y_true_threshold)
+        self.threshold = threshold
+        
         # Predict presence of flood damage
-        self.target_dataset[f'{response_variable}_prob'] = mod.model_predict(mod.x_target)
-        self.target_dataset[f'{response_variable}_class'] = mod.model_classify(mod.x_target,threshold)
-
+        self.target_dataset[f'{presence_response_variable}_prob'] = presence_mod.model_predict(presence_mod.x_target)
+        self.target_dataset[f'{presence_response_variable}_class'] = presence_mod.model_classify(presence_mod.x_target,threshold)
+        
         # Get feature importance
-        importances = mod.model.feature_importances_
-        std = np.std([tree.feature_importances_ for tree in mod.model.estimators_], axis=0)
+        importances = presence_mod.model.feature_importances_
+        std = np.std([tree.feature_importances_ for tree in presence_mod.model.estimators_], axis=0)
         importance_order = np.argsort(importances)
 
         importances = importances[importance_order]
         std = std[importance_order]
-        sorted_features = np.array(features)[importance_order]
-
-        fig,ax = plt.subplots(nrows=1,ncols=1,figsize=(6,4))
-        ax.barh(sorted_features, importances, xerr=std, align='center',color='C0',alpha=0.5,lw=1,edgecolor='k')
-        ax.set_xlim([0,None])
-        ax.set_xlabel('Mean decrease in impurity (MDI)')
-        ax.set_title('Random Forest Feature Importance')
-
-        self.presence_absence_features = features
-        self.presence_absence_response_variable = response_variable
-        self.presence_absence_feature_importance = fig
-        self.presence_absence_model = mod
-
-        return(None)
-
-    def predict_damage_cost(self,presence_variable,cost_variable,features):
-        """
-        Predict the cost of flood damage among flooded homes.
-
-        param: presence_variable: name of variable denoting presence of flood damage
-        param: cost_variable: name of variable denoting cost of flood damage
-        param: features: list of predictors
-        """
-
-        # If more than one claim matches to a building, take one with higher payout
-        payouts_by_building = self.claims[['building_id',cost_variable]].groupby('building_id').max().reset_index()
-
-        self.training_dataset[cost_variable] = self.training_dataset[['building_id']].merge(payouts_by_building,how='left',on='building_id')[cost_variable].fillna(0)
-
-        damage_cost_training = self.training_dataset[(self.training_dataset[presence_variable]==1)]
-        damage_cost_target = self.target_dataset[(self.target_dataset[f'{presence_variable}_class']==1)]
-
-        mod = RegressionObject(damage_cost_training,damage_cost_training,damage_cost_target,cost_variable,features)
-
-        # Fit Random Forest model
-        mod.model_fit()
-
-        # Compute R^2 using training data
-        y_pred = mod.model_predict(mod.x_test)
-        y_true = mod.y_test
-        errors = y_true - y_pred
-        SSE = np.sum(errors**2)
-        SST = np.sum((y_true - np.mean(y_true))**2)
-        R_sq = 1 - SSE/SST
-        RMSE = np.sqrt(np.mean(errors**2))
-
-        self.damage_cost_RMSE = RMSE
-        self.damage_cost_R_sq = R_sq
-
+        sorted_features = np.array(presence_features)[importance_order]
+        
+        self.presence_feature_importance = pd.DataFrame({'feature':sorted_features,'importance':importances,'std':std})
+        self.presence_feature_importance = self.presence_feature_importance.sort_values(by='importance',ascending=False).reset_index(drop=True)
+        self.presence_response_variable = presence_response_variable
+        self.presence_features = presence_features
+        self.presence_model = presence_mod
+        
+        # Predict cost of flood damage
+        if use_adjusted:
+            m = (self.adjusted_training_dataset[presence_response_variable]==1)
+            cost_mod = RegressionObject(self.adjusted_training_dataset[m],self.adjusted_training_dataset[m],self.target_dataset,cost_response_variable,cost_features,n_cores=n_cores)
+        else:
+            m = (self.training_dataset[presence_response_variable]==1)
+            cost_mod = RegressionObject(self.training_dataset[m],self.training_dataset[m],self.target_dataset,cost_response_variable,cost_features,n_cores=n_cores)
+        
+        cost_mod.model_fit()
+        
         # Predict cost of damage among buildings predicted as flooded
-        damage_cost_target[cost_variable] = mod.model_predict(mod.x_target)
-
-        # Join back to target dataset
-        self.target_dataset[cost_variable] = self.target_dataset[['building_id']].merge(damage_cost_target[['building_id',cost_variable]],how='left',on='building_id')[cost_variable].fillna(0)
-
-        # Save info
-        self.damage_cost_features = features
-        self.damage_cost_response_variable = cost_variable
-        self.damage_cost_model = mod
-
+        self.target_dataset[cost_response_variable] = cost_mod.model_predict(cost_mod.x_target)
+        
+        # Assume buildings classified as non-flooded don't incur damage costs
+        self.target_dataset[cost_response_variable] = self.target_dataset[cost_response_variable]*self.target_dataset[f'{presence_response_variable}_class']
+        
         # Get feature importance
-        importances = mod.model.feature_importances_
-        std = np.std([tree.feature_importances_ for tree in mod.model.estimators_], axis=0)
+        importances = cost_mod.model.feature_importances_
+        std = np.std([tree.feature_importances_ for tree in cost_mod.model.estimators_], axis=0)
         importance_order = np.argsort(importances)
 
         importances = importances[importance_order]
         std = std[importance_order]
-        sorted_features = np.array(features)[importance_order]
-
-        fig,ax = plt.subplots(nrows=1,ncols=1,figsize=(6,4))
-        ax.barh(sorted_features, importances, xerr=std, align='center',color='C0',alpha=0.5,lw=1,edgecolor='k')
-        ax.set_xlim([0,None])
-        ax.set_xlabel('Mean decrease in impurity (MDI)')
-        ax.set_title('Random Forest Feature Importance')
-
-        self.damage_cost_feature_importance = fig
-
+        sorted_features = np.array(cost_features)[importance_order]
+        
+        self.cost_feature_importance = pd.DataFrame({'feature':sorted_features,'importance':importances,'std':std})
+        self.cost_feature_importance = self.cost_feature_importance.sort_values(by='importance',ascending=False).reset_index(drop=True)
+        self.cost_response_variable = cost_response_variable
+        self.cost_features = cost_features
+        self.cost_model = cost_mod
+        
         return(None)
 
     def aggregate_flood_damage(self,stratification_columns):
@@ -744,21 +725,21 @@ class FloodEvent:
 
         param: stratification_columns: list of columns used to aggregate damage estimates.
         """
-        insured_df = self.training_dataset[['building_id','study_area','geometry','flood_damage','total_payout'] + stratification_columns].rename(columns={'flood_damage':'flood_damage_class'})
+        insured_df = self.training_dataset[['building_id','study_area','geometry','flood_damage','total_cost'] + stratification_columns].rename(columns={'flood_damage':'flood_damage_class'})
         insured_df = insured_df[insured_df['study_area']==1]
         insured_df['flood_damage_prob'] = insured_df['flood_damage_class']
         insured_df['insured'] = 1
-        uninsured_df = self.target_dataset[['building_id','study_area','geometry','flood_damage_prob','flood_damage_class','total_payout'] + stratification_columns]
+        uninsured_df = self.target_dataset[['building_id','study_area','geometry','flood_damage_prob','flood_damage_class','total_cost'] + stratification_columns]
         uninsured_df = uninsured_df[uninsured_df['study_area']==1]
         uninsured_df['insured'] = 0
         combined_df = pd.concat([insured_df,uninsured_df]).reset_index(drop=True)
-        combined_columns = ['building_id','study_area'] + stratification_columns + ['insured','flood_damage_prob','flood_damage_class','total_payout','geometry']
+        combined_columns = ['building_id','study_area'] + stratification_columns + ['insured','flood_damage_prob','flood_damage_class','total_cost','geometry']
         combined_df = combined_df[combined_columns]
 
-        agg_dict = {'building_id':'count','flood_damage_class':'sum','total_payout':'sum'}
-        insured_rename_dict = {'building_id':'n_insured','flood_damage_class':'n_flooded_insured','total_payout':'cost_flooded_insured'}
-        uninsured_rename_dict = {'building_id':'n_uninsured','flood_damage_class':'n_flooded_uninsured','total_payout':'cost_flooded_uninsured'}
-        combined_rename_dict = {'building_id':'n_total','flood_damage_class':'n_flooded_total','total_payout':'cost_flooded_total'}
+        agg_dict = {'building_id':'count','flood_damage_class':'sum','total_cost':'sum'}
+        insured_rename_dict = {'building_id':'n_insured','flood_damage_class':'n_flooded_insured','total_cost':'cost_flooded_insured'}
+        uninsured_rename_dict = {'building_id':'n_uninsured','flood_damage_class':'n_flooded_uninsured','total_cost':'cost_flooded_uninsured'}
+        combined_rename_dict = {'building_id':'n_total','flood_damage_class':'n_flooded_total','total_cost':'cost_flooded_total'}
 
         insured_agg = insured_df[stratification_columns + list(agg_dict.keys())].groupby(stratification_columns).agg(agg_dict).rename(columns=insured_rename_dict)
         uninsured_agg = uninsured_df[stratification_columns + list(agg_dict.keys())].groupby(stratification_columns).agg(agg_dict).rename(columns=uninsured_rename_dict)

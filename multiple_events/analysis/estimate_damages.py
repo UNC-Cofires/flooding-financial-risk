@@ -7,8 +7,18 @@ import matplotlib.pyplot as plt
 import datetime as dt
 import floodprediction as fp
 
-### *** LOAD MAIN DATA SOURCES *** ###
+### *** SET UP FOLDERS AND ENVIRONMENT *** ###
 
+# Specify number of available CPUs for parallel processing
+n_cores = int(os.environ['SLURM_NTASKS'])
+
+# Display values of environmental variables relevant to parallelization
+for environment_var in ['SLURM_NTASKS','OMP_NUM_THREADS','MKL_NUM_THREADS','OPENBLAS_NUM_THREADS','BLIS_NUM_THREADS']:
+    try: 
+        print(f'{environment_var}:',os.environ[environment_var],flush=True)
+    except:
+        pass
+    
 # Specify current working directory
 pwd = os.getcwd()
 
@@ -24,6 +34,8 @@ event_idx = int(os.environ['SLURM_ARRAY_TASK_ID'])
 event = eventlist.loc[event_idx].to_dict()
 event_date = pd.to_datetime(event['start_date'])
 
+### *** LOAD MAIN DATA SOURCES *** ###
+
 # Specify path to input file geodatabase
 input_gdb_path = '/proj/characklab/flooddata/NC/data_joining/2023-02-27_joined_data/included_data.gdb'
 
@@ -37,7 +49,7 @@ policies = gpd.read_file(input_gdb_path,layer='policies')
 print('Finished reading policies',flush=True)
 
 # Create column representing amount paid out in claims
-claims['total_payout'] = claims['Net_Total_Payments']
+claims['total_cost'] = claims['Net_Total_Payments']
 
 # Attach environmental data sampled at building points
 raster_values_path = '/proj/characklab/flooddata/NC/multiple_events/data_processing/rasters/raster_values_at_building_points.csv'
@@ -159,7 +171,7 @@ openfema_policies['SFHA'] = openfema_policies['floodZone'].apply(lambda x: x.sta
 # Format monetary amounts
 openfema_claims['amountPaidOnBuildingClaim'] = openfema_claims['amountPaidOnBuildingClaim'].fillna(0)
 openfema_claims['amountPaidOnContentsClaim'] = openfema_claims['amountPaidOnContentsClaim'].fillna(0)
-openfema_claims['total_payout'] = openfema_claims['amountPaidOnBuildingClaim'] + openfema_claims['amountPaidOnContentsClaim']
+openfema_claims['total_cost'] = openfema_claims['amountPaidOnBuildingClaim'] + openfema_claims['amountPaidOnContentsClaim']
 openfema_claims = openfema_claims.dropna()
 openfema_policies = openfema_policies.dropna()
 
@@ -210,7 +222,7 @@ nominal_row = inflation[inflation['DATE'] >= event['peak_date']].iloc[0]
 inflation_measure = 'USACPIALLMINMEI' # CPI - All items for United States
 inflation_multiplier = reference_row[inflation_measure]/nominal_row[inflation_measure]
 
-### *** PREDICT PRESENCE / ABSENCE OF FLOOD DAMAGE *** ###
+### *** DEFINE EVENT BOUNDARIES *** ###
 
 # Define study area and period
 fips_list = event['county_fips'].split(',')
@@ -232,7 +244,8 @@ if peak_date >= openfema_date:
 else:
     auxiliary_units = ZCTAs
     unit_name = 'reportedZipCode'
-
+    
+### *** INITIALIZE FLOOD EVENT OBJECT *** ###
 floodevent = fp.FloodEvent(study_area,start_date,end_date,peak_date,crs,auxiliary_units)
 floodevent.preprocess_data(parcels,buildings,claims,policies,inflation_multiplier)
 
@@ -240,69 +253,62 @@ floodevent.preprocess_data(parcels,buildings,claims,policies,inflation_multiplie
 # Based on this information, generate pseudo-absences
 floodevent.preprocess_auxiliary(auxiliary_claims,auxiliary_policies,unit_name,inflation_multiplier)
 floodevent.stratify_missing([unit_name,'SFHA'])
-floodevent.create_pseudo_absences(n_realizations=100)
+floodevent.create_pseudo_absences()
 floodevent.crop_to_study_area()
 
-# Define features used to predict presence/absence of flood damage
-response_variable = 'flood_damage'
+### *** DEFINE FEATURES USED FOR FLOOD DAMAGE PREDICTION *** ###
 
-presence_absence_features = ['SFHA',
-                             'NHDcoastline_DistRaster_500res_08222022',
-                             'NC_MajorHydro_DistRaster_500res_08292022',
-                             'HANDraster_MosaicR_IDW30_finalR_03032023',
-                             'TWIrasterHuc12_10262022',
-                             'soilsKsat_NC_03072023',
-                             'NEDavgslope_NCcrop_huc12_10262022',
-                             'NEDraster_resample_07042022',
-                             'NLCDimpraster_NC2016_07132022']
+# Define features used to predict presence/absence of flood damage
+presence_response_variable = 'flood_damage'
+presence_features = ['SFHA',
+                     'NHDcoastline_DistRaster_500res_08222022',
+                     'NC_MajorHydro_DistRaster_500res_08292022',
+                     'HANDraster_MosaicR_IDW30_finalR_03032023',
+                     'TWIrasterHuc12_10262022',
+                     'soilsKsat_NC_03072023',
+                     'NEDavgslope_NCcrop_huc12_10262022',
+                     'NEDraster_resample_07042022',
+                     'NLCDimpraster_NC2016_07132022']
 
 huc_columns = [x for x in floodevent.training_dataset.columns if x.startswith('huc')]
-presence_absence_features += huc_columns
+presence_features += huc_columns
 
 # Remove features that are uninformative or highly correlated with others
-presence_absence_features = fp.remove_unnecessary_features(presence_absence_features,floodevent.training_dataset,max_corr=0.7)
-
-# Perform k-fold cross-validation
-floodevent.cross_validate(response_variable,presence_absence_features,k=5,use_adjusted=True)
-
-# Specify threshold based on CV results
-threshold = floodevent.performance_metrics['threshold'].mean().round(2)
-print(f'Classification threshold: {threshold}')
-
-# Predict presence/absence of flooding
-floodevent.predict_presence_absence(response_variable,presence_absence_features,use_adjusted=True,threshold=threshold)
-
-### *** PREDICT COST OF DAMAGES AMONG FLOODED HOMES *** ###
+presence_features = fp.remove_unnecessary_features(presence_features,floodevent.training_dataset,max_corr=0.7)
 
 # Define features used to predict cost of damage among flooded buildings
-damage_cost_features = ['SFHA',
-                        'YEAR_BUILT',
-                        'BLDG_VALUE',
-                        'HTD_SQ_FT',
-                        'FFE',
-                        'NHDcoastline_DistRaster_500res_08222022',
-                        'NC_MajorHydro_DistRaster_500res_08292022',
-                        'HANDraster_MosaicR_IDW30_finalR_03032023',
-                        'TWIrasterHuc12_10262022',
-                        'soilsKsat_NC_03072023',
-                        'NEDavgslope_NCcrop_huc12_10262022',
-                        'NEDraster_resample_07042022',
-                        'NLCDimpraster_NC2016_07132022']
+cost_response_variable = 'total_cost'
+cost_features = ['SFHA',
+                 'YEAR_BUILT',
+                 'BLDG_VALUE',
+                 'HTD_SQ_FT',
+                 'FFE',
+                 'NHDcoastline_DistRaster_500res_08222022',
+                 'NC_MajorHydro_DistRaster_500res_08292022',
+                 'HANDraster_MosaicR_IDW30_finalR_03032023',
+                 'TWIrasterHuc12_10262022',
+                 'soilsKsat_NC_03072023',
+                 'NEDavgslope_NCcrop_huc12_10262022',
+                 'NEDraster_resample_07042022',
+                 'NLCDimpraster_NC2016_07132022']
 
 huc_columns = [x for x in floodevent.training_dataset.columns if x.startswith('huc')]
-damage_cost_features += huc_columns
+cost_features += huc_columns
 
 occup_columns = [x for x in floodevent.training_dataset.columns if x.startswith('OCCUP_TYPE')]
-damage_cost_features += occup_columns
+cost_features += occup_columns
 
 found_columns = [x for x in floodevent.training_dataset.columns if x.startswith('FOUND_TYPE')]
-damage_cost_features += found_columns
+cost_features += found_columns
 
 # Remove features that are uninformative or highly correlated with others
-damage_cost_features = fp.remove_unnecessary_features(damage_cost_features,floodevent.training_dataset,max_corr=0.7)
+cost_features = fp.remove_unnecessary_features(cost_features,floodevent.training_dataset,max_corr=0.7)
 
-# Predict cost of flood-related damages among buildings predicted as flooded
-floodevent.predict_damage_cost('flood_damage','total_payout',damage_cost_features)
+### *** PERFORM CROSS VALIDATION *** ###
+floodevent.random_cross_validation(presence_response_variable,presence_features,cost_response_variable,cost_features,use_adjusted=True,k=5,n_cores=n_cores)
+
+### *** PREDICT FLOOD DAMAGE AMONG UNINSURED *** ###
+floodevent.predict_flood_damage(presence_response_variable,presence_features,cost_response_variable,cost_features,use_adjusted=True,n_cores=n_cores)
 
 ### *** SAVE RESULTS *** ###
 with open(os.path.join(outfolder,f'{event_name}_FloodEvent.object'),'wb') as f:
