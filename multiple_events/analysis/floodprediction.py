@@ -152,7 +152,7 @@ def confusion_matrix(y_pred,y_true,threshold):
     """
     y_class = (y_pred > threshold).astype(int)
 
-    TN, FP, FN, TP = metrics.confusion_matrix(y_true, y_class).ravel()
+    TN, FP, FN, TP = metrics.confusion_matrix(y_true, y_class,labels=[0,1]).ravel()
 
     P = TP + FN
     N = TN + FP
@@ -232,7 +232,6 @@ def cv_fold(fold,train_df,test_df,presence_response_variable,presence_features,c
         param: n_cores: number of cores to use if running tasks in parallel
         """
         
-        results_dict = {'fold':fold}
         test_df['fold'] = fold
         
         fpr_viz_vals = np.linspace(0,1,501)
@@ -247,7 +246,6 @@ def cv_fold(fold,train_df,test_df,presence_response_variable,presence_features,c
         y_pred_threshold = presence_mod.model_predict(presence_mod.x)
         y_true_threshold = presence_mod.y
         threshold = maximized_accuracy_threshold(y_pred_threshold,y_true_threshold)        
-        results_dict['threshold'] = threshold
         
         # Predict presence/absence for test set
         y_pred = presence_mod.model_predict(presence_mod.x_test)
@@ -278,51 +276,102 @@ def cv_fold(fold,train_df,test_df,presence_response_variable,presence_features,c
         
         # Add predictions to dataset
         test_df[f'{cost_response_variable}_pred'] = c_pred
-        
-        # Compute performance metrics
-
-        # Threshold-independent metrics
-        results_dict['roc_auc'] = metrics.roc_auc_score(y_true,y_pred)
-        results_dict['avg_prec'] = metrics.average_precision_score(y_true,y_pred)
-        results_dict['bs_loss'] = metrics.brier_score_loss(y_true,y_pred)
-        results_dict['log_loss'] = metrics.log_loss(y_true,y_pred)
-
-        # Threshold-dependent metrics
-        results_dict['accuracy'] = metrics.accuracy_score(y_true,y_class)
-        results_dict['balanced_accuracy'] = metrics.balanced_accuracy_score(y_true,y_class)
-        results_dict['f1_score'] = metrics.f1_score(y_true,y_class)
-        tn, fp, fn, tp = metrics.confusion_matrix(y_true, y_class).ravel()
-        results_dict['sensitivity'] = tp/(tp + fn)
-        results_dict['specificity'] = tn/(tn + fp)
-        results_dict['precision'] = tp/(tp + fp)
-        
-        # Metrics related to damage cost estimation
-        residuals = c_true - c_pred
-        
-        SSE = np.sum(residuals**2)
-        SST = np.sum((c_true - np.mean(c_true))**2)
-        R_sq = 1 - SSE/SST
-        MAE = np.mean(np.abs(residuals))
-        RMSE = np.sqrt(np.mean(residuals**2))
-        results_dict['damage_cost_Rsq'] = R_sq
-        results_dict['damage_cost_MAE'] = MAE
-        results_dict['damage_cost_RMSE'] = RMSE
-        
-        # Get data needed for ROC and PR curves
-        fpr_vals, tpr_vals, threshold_vals = metrics.roc_curve(y_true, y_pred)
-        roc_interp_func = interp1d(fpr_vals,tpr_vals)
-        tpr_viz_vals = roc_interp_func(fpr_viz_vals)
-        roc_df = pd.DataFrame({'fpr':fpr_viz_vals,'tpr':tpr_viz_vals})
-        roc_df['fold'] = fold 
-
-        prec_vals, rec_vals, threshold_vals = metrics.precision_recall_curve(y_true, y_pred)
-        pr_interp_func = interp1d(rec_vals,prec_vals)
-        prec_viz_vals = pr_interp_func(rec_viz_vals)
-        pr_df = pd.DataFrame({'rec':rec_viz_vals,'prec':prec_viz_vals})
-        pr_df['fold'] = fold 
             
-        return([test_df,results_dict,roc_df,pr_df])
+        return(test_df)
+    
+# Measures of model performance
+def performance_metrics(y_pred,y_class,y_true,c_pred,c_true):
+    """
+    param: y_pred: numpy array of predicted flood damage probabilities
+    param: y_class: numpy array of predicted flood damage class labels
+    param: y_true: numpy array of true flood damage class labels
+    param: c_pred: numpy array of predicted damage costs
+    param: c_true: numpy array of true damage costs
+    """
+    results_dict = {}
+    fpr_viz_vals = np.linspace(0,1,501)
+    rec_viz_vals = np.linspace(0,1,501)
+    
+    # Compute performance metrics
 
+    # Threshold-independent metrics
+    results_dict['roc_auc'] = metrics.roc_auc_score(y_true,y_pred)
+    results_dict['avg_prec'] = metrics.average_precision_score(y_true,y_pred)
+    results_dict['bs_loss'] = metrics.brier_score_loss(y_true,y_pred)
+    results_dict['log_loss'] = metrics.log_loss(y_true,y_pred)
+
+    # Threshold-dependent metrics
+    results_dict['accuracy'] = metrics.accuracy_score(y_true,y_class)
+    results_dict['balanced_accuracy'] = metrics.balanced_accuracy_score(y_true,y_class)
+    results_dict['f1_score'] = metrics.f1_score(y_true,y_class)
+    tn, fp, fn, tp = metrics.confusion_matrix(y_true, y_class).ravel()
+    results_dict['sensitivity'] = tp/(tp + fn)
+    results_dict['specificity'] = tn/(tn + fp)
+    results_dict['precision'] = tp/(tp + fp)
+
+    # Metrics related to damage cost estimation
+    R_sq = metrics.r2_score(c_true,c_pred)
+    MAE = metrics.mean_absolute_error(c_true,c_pred)
+    RMSE = metrics.mean_squared_error(c_true,c_pred,squared=False)
+    results_dict['damage_cost_Rsq'] = R_sq
+    results_dict['damage_cost_MAE'] = MAE
+    results_dict['damage_cost_RMSE'] = RMSE
+    
+    # Get data needed for ROC and PR curves
+    fpr_vals, tpr_vals, threshold_vals = metrics.roc_curve(y_true, y_pred)
+    roc_interp_func = interp1d(fpr_vals,tpr_vals)
+    tpr_viz_vals = roc_interp_func(fpr_viz_vals)
+    roc_df = pd.DataFrame({'fpr':fpr_viz_vals,'tpr':tpr_viz_vals})
+
+    prec_vals, rec_vals, threshold_vals = metrics.precision_recall_curve(y_true, y_pred)
+    pr_interp_func = interp1d(rec_vals,prec_vals)
+    prec_viz_vals = pr_interp_func(rec_viz_vals)
+    pr_df = pd.DataFrame({'rec':rec_viz_vals,'prec':prec_viz_vals})
+    
+    return(results_dict,roc_df,pr_df)
+    
+def build_neighbor_dict(gdf):
+    """
+    Build a dictionary specifying the neighbors of a given polygon in a geodataframe
+    """
+    neighbor_dict = {}
+    
+    gdf['geometry'] = gdf['geometry'].buffer(5)
+    
+    for index, row in gdf.iterrows():
+        neighbors = gdf[gdf['geometry'].intersects(row['geometry'])].index.tolist()
+        neighbors = [x for x in neighbors if x != index]
+        neighbor_dict[index] = neighbors
+        
+    return(neighbor_dict)
+
+def spatial_block_cv_split(tiles):
+    """
+    Create spatially-blocked cross validation splits. 
+    Includes a built-in buffer layer of tiles between testing and training set. 
+    
+    param: tiles: pandas geodataframe of spatial blocks
+    returns: list of tuples denoting tile indices in train/test set for each split. 
+    """
+    neighbor_dict = build_neighbor_dict(tiles)
+    
+    splits = []
+    
+    for test_index in tiles.index.values:
+        
+        # Exclude tiles bordering test set from training set
+        excluded_tiles = neighbor_dict[test_index]
+        m1 = np.isin(tiles.index.values,excluded_tiles)
+        
+        # Also exclude tile corresponding to test set
+        m2 = (tiles.index.values == test_index)
+                
+        train_indices = tiles.index.values[~(m1|m2)]
+        
+        splits.append((train_indices,test_index))
+        
+    return(splits)
+    
 # *** Flood event class for implementing data processing and prediction workflow
 
 class FloodEvent:
@@ -594,7 +643,7 @@ class FloodEvent:
         param: n_cores: number of cores to use if running tasks in parallel
         """
         
-        print(f'*** {k}-fold cross validation (random) ***',flush=True)
+        print(f'\n*** {k}-fold cross validation (random) ***',flush=True)
 
         kf = KFold(n_splits=k,random_state=None,shuffle=True)
         
@@ -604,9 +653,6 @@ class FloodEvent:
             data = self.training_dataset
             
         predictions_list = []
-        results_list = []
-        roc_list = []
-        pr_list = []
         
         t0 = time.time()
             
@@ -617,12 +663,8 @@ class FloodEvent:
             train_df = data.iloc[train_indices].copy()
             test_df = data.iloc[test_indices].copy()
             
-            predictions,results_dict,roc_curve,pr_curve = cv_fold(i,train_df,test_df,presence_response_variable,presence_features,cost_response_variable,cost_features,n_cores=n_cores)
-
+            predictions = cv_fold(i,train_df,test_df,presence_response_variable,presence_features,cost_response_variable,cost_features,n_cores=n_cores)
             predictions_list.append(predictions)
-            results_list.append(results_dict)
-            roc_list.append(roc_curve)
-            pr_list.append(pr_curve)
             
             t2 = time.time()
             
@@ -631,16 +673,89 @@ class FloodEvent:
             
             print(f'CV fold {i+1} / {k} (time elapsed: {elapsed_time} last iteration / {cumulative_elapsed_time} cumulative)',flush=True)
 
-        # Save performance metrics in dataframe
+        # Calculate performance metrics
         predictions_df = pd.concat(predictions_list)
-        results_df = pd.DataFrame(results_list)
-        roc_curve_df = pd.concat(roc_list)
-        pr_curve_df = pd.concat(pr_list)
+        
+        y_pred = predictions_df[f'{presence_response_variable}_prob'].to_numpy()
+        y_class = predictions_df[f'{presence_response_variable}_class'].to_numpy()
+        y_true = predictions_df[presence_response_variable].to_numpy()
+        c_pred = predictions_df[f'{cost_response_variable}_pred'].to_numpy()
+        c_true = predictions_df[cost_response_variable].to_numpy()
+        
+        results_dict,roc_curve,pr_curve = performance_metrics(y_pred,y_class,y_true,c_pred,c_true)
         
         self.random_cv_predictions = predictions_df
-        self.random_cv_performance_metrics = results_df
-        self.random_cv_roc_curve = roc_curve_df
-        self.random_cv_pr_curve = pr_curve_df
+        self.random_cv_performance_metrics = results_dict
+        self.random_cv_roc_curve = roc_curve
+        self.random_cv_pr_curve = pr_curve
+
+        return(None)
+    
+    def spatial_cross_validation(self,presence_response_variable,presence_features,cost_response_variable,cost_features,tiles,use_adjusted=True,n_cores=1):
+        """
+        param: presence_response_variable: name of binary response variable indicating presence/absence of flooding
+        param: presence_features: list of features used to predict the presence/absence of flood damage
+        param: cost_response_variable: name of continuous variable indicating cost of damages
+        param: cost_features: list of features used to predict the cost of damage to flooded structures
+        param: tiles: spatial blocks used to define cross-validation splits
+        param: use_adjusted: if true, train models using adjusted training data which includes pseudo-absences
+        param: n_cores: number of cores to use if running tasks in parallel
+        """
+        
+        tiles = tiles[tiles['geometry'].intersects(self.study_area)][['geometry']]
+        k = len(tiles)
+        tiles.index = np.arange(k)
+        
+        if use_adjusted:
+            data = self.adjusted_training_dataset
+        else:
+            data = self.training_dataset
+            
+        data = gpd.sjoin(data,tiles).rename(columns={'index_right':'tile_index'})
+        
+        splits = spatial_block_cv_split(tiles)
+                
+        print(f'\n*** {k}-fold cross validation (spatial) ***',flush=True)
+            
+        predictions_list = []
+        
+        t0 = time.time()
+            
+        for i,(train_tile_indices,test_tile_index) in enumerate(splits):
+            
+            t1 = time.time()
+            
+            train_df = data[data['tile_index'].isin(train_tile_indices)].copy()
+            test_df = data[data['tile_index']==test_tile_index].copy()
+            
+            if len(test_df) > 0:
+            
+                predictions = cv_fold(i,train_df,test_df,presence_response_variable,presence_features,cost_response_variable,cost_features,n_cores=n_cores)
+                predictions_list.append(predictions)
+            
+            t2 = time.time()
+            
+            elapsed_time = format_elapsed_time(t2-t1)
+            cumulative_elapsed_time = format_elapsed_time(t2-t0)
+            
+            print(f'CV fold {i+1} / {k} (time elapsed: {elapsed_time} last iteration / {cumulative_elapsed_time} cumulative)',flush=True)
+
+        # Calculate performance metrics
+        predictions_df = pd.concat(predictions_list)
+        
+        y_pred = predictions_df[f'{presence_response_variable}_prob'].to_numpy()
+        y_class = predictions_df[f'{presence_response_variable}_class'].to_numpy()
+        y_true = predictions_df[presence_response_variable].to_numpy()
+        c_pred = predictions_df[f'{cost_response_variable}_pred'].to_numpy()
+        c_true = predictions_df[cost_response_variable].to_numpy()
+        
+        results_dict,roc_curve,pr_curve = performance_metrics(y_pred,y_class,y_true,c_pred,c_true)
+        
+        self.spatial_cv_tiles = tiles
+        self.spatial_cv_predictions = predictions_df
+        self.spatial_cv_performance_metrics = results_dict
+        self.spatial_cv_roc_curve = roc_curve
+        self.spatial_cv_pr_curve = pr_curve
 
         return(None)
     

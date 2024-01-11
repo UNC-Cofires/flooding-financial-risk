@@ -13,7 +13,15 @@ import floodprediction as fp
 n_cores = int(os.environ['SLURM_NTASKS'])
 
 # Display values of environmental variables relevant to parallelization
-for environment_var in ['SLURM_NTASKS','OMP_NUM_THREADS','MKL_NUM_THREADS','OPENBLAS_NUM_THREADS','BLIS_NUM_THREADS']:
+relevant_environment_vars = ['SLURM_NTASKS',
+                             'OMP_NUM_THREADS',
+                             'MKL_NUM_THREADS',
+                             'OPENBLAS_NUM_THREADS',
+                             'BLIS_NUM_THREADS',
+                             'VECLIB_MAXIMUM_THREADS',
+                             'NUMEXPR_NUM_THREADS']
+
+for environment_var in relevant_environment_vars:
     try: 
         print(f'{environment_var}:',os.environ[environment_var],flush=True)
     except:
@@ -83,6 +91,10 @@ ZCTAs = ZCTAs.rename(columns={'ZCTA':'reportedZipCode'})
 watersheds_path = '/proj/characklab/flooddata/NC/multiple_events/geospatial_data/USGS/NC_HUC6'
 watersheds = gpd.read_file(watersheds_path).to_crs(crs)
 watersheds = watersheds[['huc6','geometry']]
+
+# Read in geodataframe of tiles to be used in spatial cross-validation
+tiles_path = '/proj/characklab/flooddata/NC/multiple_events/geospatial_data/NC_tiles/nc_5km_hexgrid'
+tiles = gpd.read_file(tiles_path).to_crs(crs)
 
 ### *** PRE-PROCESS MAIN DATA SOURCES ***
 
@@ -305,12 +317,13 @@ cost_features += found_columns
 cost_features = fp.remove_unnecessary_features(cost_features,floodevent.training_dataset,max_corr=0.7)
 
 ### *** PERFORM CROSS VALIDATION *** ###
-floodevent.random_cross_validation(presence_response_variable,presence_features,cost_response_variable,cost_features,use_adjusted=True,k=5,n_cores=n_cores)
+floodevent.random_cross_validation(presence_response_variable,presence_features,cost_response_variable,cost_features,use_adjusted=True,k=10,n_cores=n_cores)
+floodevent.spatial_cross_validation(presence_response_variable,presence_features,cost_response_variable,cost_features,tiles,use_adjusted=True,n_cores=n_cores)
 
 ### *** PREDICT FLOOD DAMAGE AMONG UNINSURED *** ###
 floodevent.predict_flood_damage(presence_response_variable,presence_features,cost_response_variable,cost_features,use_adjusted=True,n_cores=n_cores)
 
 ### *** SAVE RESULTS *** ###
-with open(os.path.join(outfolder,f'{event_name}_FloodEvent.object'),'wb') as f:
+with open(os.path.join(outfolder,f'{peak_date}_{event_name}_FloodEvent.object'),'wb') as f:
     pickle.dump(floodevent,f)
     f.close()
