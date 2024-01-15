@@ -64,6 +64,13 @@ raster_values_path = '/proj/characklab/flooddata/NC/multiple_events/data_process
 raster_values = pd.read_csv(raster_values_path)
 buildings = pd.merge(buildings,raster_values,on='building_id',how='left')
 
+# Attach precipitation data sampled at building points
+precip_values_path = '/proj/characklab/flooddata/NC/multiple_events/data_processing/rasters/max_3day_precip_at_building_points.csv'
+precip_values = pd.read_csv(precip_values_path)
+precip_column = [x for x in precip_values.columns if event['name'] in x][0]
+precip_values = precip_values[['building_id',precip_column]]
+buildings = pd.merge(buildings,precip_values,on='building_id',how='left')
+
 # Rename SFHA columns (this will make it easier to match up with OpenFEMA later)
 buildings = buildings.rename(columns={'NC_SFHA_NoX_extend_10252022':'SFHA'})
 
@@ -275,6 +282,7 @@ presence_response_variable = 'flood_damage'
 presence_features = ['SFHA',
                      'NHDcoastline_DistRaster_500res_08222022',
                      'NC_MajorHydro_DistRaster_500res_08292022',
+                     precip_column,
                      'HANDraster_MosaicR_IDW30_finalR_03032023',
                      'TWIrasterHuc12_10262022',
                      'soilsKsat_NC_03072023',
@@ -297,6 +305,7 @@ cost_features = ['SFHA',
                  'FFE',
                  'NHDcoastline_DistRaster_500res_08222022',
                  'NC_MajorHydro_DistRaster_500res_08292022',
+                 precip_column,
                  'HANDraster_MosaicR_IDW30_finalR_03032023',
                  'TWIrasterHuc12_10262022',
                  'soilsKsat_NC_03072023',

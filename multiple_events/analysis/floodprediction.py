@@ -4,8 +4,8 @@ import geopandas as gpd
 import datetime as dt
 import matplotlib.pyplot as plt
 import sklearn.metrics as metrics
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import KFold
+from sklearn.ensemble import RandomForestRegressor,RandomForestClassifier
+from sklearn.model_selection import KFold,GridSearchCV
 from scipy.interpolate import interp1d
 import time
 
@@ -13,7 +13,7 @@ import time
 
 class RegressionObject:
 
-    def __init__(self,train_df,test_df,target_df,response_variable,features,n_cores=1):
+    def __init__(self,train_df,test_df,target_df,response_variable,features,n_cores=1,hyperparams={'max_depth':5}):
         """
         param: train_df: pandas dataframe of training data (m x n+1)
         param: test_df: pandas dataframe of validation data (m x n+1)
@@ -21,6 +21,7 @@ class RegressionObject:
         param: response_variable: name of response variable
         param: features: list of predictors (n)
         param: n_cores: number of threads to use for parallelization of model
+        param: hyperparams: hyperparameters passed to random forest model
         """
         self.features = [f for f in features if f != response_variable and f != train_df.index.name]
         self.response_variable = response_variable
@@ -31,14 +32,14 @@ class RegressionObject:
         self.x_target = target_df[self.features].to_numpy()
         self.model = None
         self.n_cores = n_cores
-
+        self.hyperparams = hyperparams
         return(None)
 
     def model_fit(self):
         """
         Fit a random forest regression model to the data
         """
-        self.model = RandomForestRegressor(max_depth=5,n_jobs=self.n_cores)
+        self.model = RandomForestRegressor(**self.hyperparams,n_jobs=self.n_cores)
         self.model.fit(self.x,self.y)
 
         return(None)
@@ -237,8 +238,11 @@ def cv_fold(fold,train_df,test_df,presence_response_variable,presence_features,c
         fpr_viz_vals = np.linspace(0,1,501)
         rec_viz_vals = np.linspace(0,1,501)
         
+        # Determine hyperparameters for random forest models
+        presence_hyperparams,cost_hyperparams = tune_hyperparams(train_df,presence_response_variable,presence_features,cost_response_variable,cost_features,n_cores=n_cores)
+        
         # Fit prediction model for presence/absence of flooding
-        presence_mod = RegressionObject(train_df,test_df,test_df,presence_response_variable,presence_features,n_cores=n_cores)
+        presence_mod = RegressionObject(train_df,test_df,test_df,presence_response_variable,presence_features,n_cores=n_cores,hyperparams=presence_hyperparams)
         presence_mod.model_fit()
         
         # If not already specified, calculate the optimal threshold based on
@@ -262,7 +266,7 @@ def cv_fold(fold,train_df,test_df,presence_response_variable,presence_features,c
         
         # Fit prediction model for cost of damage among flooded homes
         cost_train_df = train_df[train_df[presence_response_variable]==1]
-        cost_mod = RegressionObject(cost_train_df,test_df,test_df,cost_response_variable,cost_features,n_cores=n_cores)
+        cost_mod = RegressionObject(cost_train_df,test_df,test_df,cost_response_variable,cost_features,n_cores=n_cores,hyperparams=cost_hyperparams)
         cost_mod.model_fit()
         
         # Predict cost of flood damage among buildings in test set
@@ -329,6 +333,43 @@ def performance_metrics(y_pred,y_class,y_true,c_pred,c_true):
     pr_df = pd.DataFrame({'rec':rec_viz_vals,'prec':prec_viz_vals})
     
     return(results_dict,roc_df,pr_df)
+
+def tune_hyperparams(data,presence_response_variable,presence_features,cost_response_variable,cost_features,k=5,n_cores=1):
+    """
+    param: data: training data used for hyperparameter tuning
+    param: presence_response_variable: name of binary response variable indicating presence/absence of flooding
+    param: presence_features: list of features used to predict the presence/absence of flood damage
+    param: cost_response_variable: name of continuous variable indicating cost of damages
+    param: cost_features: list of features used to predict the cost of damage to flooded structures
+    param: use_adjusted: if true, train models using adjusted training data which includes pseudo-absences
+    param: k: number of folds to use in hyperparameter tuning
+    param: n_cores: number of cores to use if running tasks in parallel
+    """        
+        
+    # Determine optimal hyperparameters for presence-absence model
+    y = data[presence_response_variable].to_numpy()
+    x = data[presence_features].to_numpy()
+
+    param_grid = {'n_estimators':[150],'max_depth':[3,5,7],'max_features':['sqrt']}
+    model = RandomForestClassifier()
+
+    grid_search = GridSearchCV(model, param_grid=param_grid, cv=k, scoring='roc_auc',n_jobs=n_cores)
+    grid_search.fit(x,y)
+    presence_hyperparams = grid_search.best_params_ 
+
+    # Determine optimal hyperparameters for damage cost model
+    m = (data[presence_response_variable]==1)
+    y = data[m][cost_response_variable].to_numpy()
+    x = data[m][cost_features].to_numpy()
+
+    param_grid = {'n_estimators':[150],'max_depth':[3,5,7],'max_features':[0.33,0.5,0.66]}
+    model = RandomForestRegressor()
+
+    grid_search = GridSearchCV(model, param_grid=param_grid, cv=k, scoring='r2',n_jobs=n_cores)
+    grid_search.fit(x,y)
+    cost_hyperparams = grid_search.best_params_
+
+    return(presence_hyperparams,cost_hyperparams)
     
 def build_neighbor_dict(gdf):
     """
@@ -769,10 +810,15 @@ class FloodEvent:
         param: n_cores: number of cores to use if running tasks in parallel
         """
         if use_adjusted:
-            presence_mod = RegressionObject(self.adjusted_training_dataset,self.adjusted_training_dataset,self.target_dataset,presence_response_variable,presence_features,n_cores=n_cores)
+            train_df = self.adjusted_training_dataset
         else:
-            presence_mod = RegressionObject(self.training_dataset,self.training_dataset,self.target_dataset,presence_response_variable,presence_features,n_cores=n_cores)
+            train_df = self.training_dataset
+            
+        # Determine hyperparameters for random forest models
+        presence_hyperparams,cost_hyperparams = tune_hyperparams(train_df,presence_response_variable,presence_features,cost_response_variable,cost_features,n_cores=n_cores)
         
+        # Train presence / absence prediction model
+        presence_mod = RegressionObject(train_df,train_df,self.target_dataset,presence_response_variable,presence_features,n_cores=n_cores,hyperparams=presence_hyperparams)
         presence_mod.model_fit()
         
         # Determine maximum accuracy threshold based on training data
@@ -799,14 +845,11 @@ class FloodEvent:
         self.presence_response_variable = presence_response_variable
         self.presence_features = presence_features
         self.presence_model = presence_mod
+        self.presence_hyperparams = presence_hyperparams
         
         # Predict cost of flood damage
-        if use_adjusted:
-            m = (self.adjusted_training_dataset[presence_response_variable]==1)
-            cost_mod = RegressionObject(self.adjusted_training_dataset[m],self.adjusted_training_dataset[m],self.target_dataset,cost_response_variable,cost_features,n_cores=n_cores)
-        else:
-            m = (self.training_dataset[presence_response_variable]==1)
-            cost_mod = RegressionObject(self.training_dataset[m],self.training_dataset[m],self.target_dataset,cost_response_variable,cost_features,n_cores=n_cores)
+        m = (train_df[presence_response_variable]==1)
+        cost_mod = RegressionObject(train_df[m],train_df[m],self.target_dataset,cost_response_variable,cost_features,n_cores=n_cores,hyperparams=cost_hyperparams)
         
         cost_mod.model_fit()
         
@@ -830,6 +873,7 @@ class FloodEvent:
         self.cost_response_variable = cost_response_variable
         self.cost_features = cost_features
         self.cost_model = cost_mod
+        self.cost_hyperparams=cost_hyperparams
         
         return(None)
 
