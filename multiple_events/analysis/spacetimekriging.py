@@ -1,6 +1,7 @@
 import numpy as np
 import scipy.stats as stats
 import scipy.spatial as spatial
+import scipy.special as special
 import scipy.optimize as so
 import pandas as pd
 import geopandas as gpd
@@ -11,24 +12,16 @@ import geopandas as gpd
 # CauCovFun
 # MatCovFun
 
-class SphCovFun:
+### *** COVARIANCE FUNCTION BUILDING BLOCKS *** ###
+
+class CovFun:
     """
-    Spherical covariance function class
+    Parent class used to define shared methods of difference covariance models
     """
     
-    def __init__(self,a=None,a_bounds=(0,10),a_guess=5):
-        """
-        param: a: scale parameter determining speed at which spatial / temporal dependence decays
-        param: a_bounds: bounds on "a" if fitting as a free parameter 
-        param: a_guess: initial guess for value of "a" if fitting as a free parameter
-        """
-        self.a = a
-        self.a_bounds = a_bounds
-        self.a_guess = a_guess
-        self.params = ['a']
-        self.name = 'SphCovFun'
+    def __init__(self):
         self.determine_param_status()
-
+        
     def determine_param_status(self):
         """
         Determine whether parameters are fixed or need to be fitted
@@ -47,19 +40,16 @@ class SphCovFun:
                 
         return None
     
-    def get_bounds_and_initial_guess(self):
+    def get_bounds(self):
         """
-        Get bounds and initial guesses for free parameters 
+        Get bounds on free parameters 
         """
         bounds = []
-        initial_guess = []
         
         for param in self.free_params:
-            bounds.append(getattr(self,param + '_bounds'))
-            initial_guess.append(getattr(self,param + '_guess'))
-        
-        return(bounds,initial_guess)
-                    
+            bounds.append(getattr(self,param + '_bounds'))        
+        return(bounds)
+    
     def update_params(self,**kwargs):
         """
         Update values of model parameters
@@ -71,20 +61,13 @@ class SphCovFun:
         
         return None
     
-    def cov(self,h):
-        """
-        Return value of covariance function
-        param: h: value of spatial or temporal distance between points
-        """
-        
+    def verify_all_fixed(self):
         if not self.all_fixed:
             free_params = ', '.join(self.free_params)
             raise ValueError(f'Please specify the following model parameters: {free_params}')
             
-        c = (1-np.heaviside(h - self.a,0))*(1 - 1.5*h/self.a + 0.5*h**3/self.a**3)
+        return None
         
-        return c
-    
     def vgm(self,h):
         """
         Return value of the variogram function
@@ -93,39 +76,152 @@ class SphCovFun:
         v = self.cov(0) - self.cov(h)
         return v
     
-class ProductSumSTCovFun:
+class SphCovFun(CovFun):
     """
-    Product-sum space-time covariance model
-    described in De Iaco, Myers, and Posa (2016), doi:10.1016/S0167-7152(00)00200-5
+    Spherical covariance function class (child class of CovFun)
     """
-    def __init__(self,Cs,Ct,k1=None,k2=None,k3=None,k1_bounds=(0,10),k2_bounds=(0,10),k3_bounds=(0,10),k1_guess=5,k2_guess=5,k3_guess=5):
+    def __init__(self,a=None,a_bounds=(0,10)):
+        """
+        param: a: scale parameter determining speed at which spatial / temporal dependence decays
+        param: a_bounds: bounds on "a" if fitting as a free parameter 
+        """
+        self.a = a
+        self.a_bounds = a_bounds
+        self.params = ['a']
+        self.name = 'SphCovFun'
+        super().__init__()
+    
+    def cov(self,h):
+        """
+        Return value of covariance function
+        param: h: value of spatial or temporal distance between points
+        """
+        self.verify_all_fixed()
+        c = (1-np.heaviside(h - self.a,0))*(1 - 1.5*h/self.a + 0.5*h**3/self.a**3)
+        return c
+    
+class ExpCovFun(CovFun):
+    """
+    Exponential covariance function class (child class of CovFun)
+    """
+    def __init__(self,a=None,a_bounds=(0,10)):
+        """
+        param: a: scale parameter determining speed at which spatial / temporal dependence decays
+        param: a_bounds: bounds on "a" if fitting as a free parameter 
+        """
+        self.a = a
+        self.a_bounds = a_bounds
+        self.params = ['a']
+        self.name = 'ExpCovFun'
+        super().__init__()
+    
+    def cov(self,h):
+        """
+        Return value of covariance function
+        param: h: value of spatial or temporal distance between points
+        """
+        self.verify_all_fixed()
+        c = np.exp(-h/self.a)
+        return c
+    
+class GauCovFun(CovFun):
+    """
+    Gaussian covariance function class (child class of CovFun)
+    """
+    def __init__(self,a=None,a_bounds=(0,10)):
+        """
+        param: a: scale parameter determining speed at which spatial / temporal dependence decays
+        param: a_bounds: bounds on "a" if fitting as a free parameter 
+        """
+        self.a = a
+        self.a_bounds = a_bounds
+        self.params = ['a']
+        self.name = 'GauCovFun'
+        super().__init__()
+    
+    def cov(self,h):
+        """
+        Return value of covariance function
+        param: h: value of spatial or temporal distance between points
+        """
+        self.verify_all_fixed()
+        c = np.exp(-h**2/self.a**2)
+        return c
+    
+class CauCovFun(CovFun):
+    """
+    Cauchy covariance function class (child class of CovFun)
+    """
+    def __init__(self,a=None,a_bounds=(0,10),beta=None,beta_bounds=(0,10),alpha=2,alpha_bounds=(0,2)):
+        """
+        param: a: scale parameter determining speed at which spatial / temporal dependence decays
+        param: a_bounds: bounds on a if fitting as a free parameter
+        param: beta: parameter affecting dependence at large distances
+        param: beta_bounds: bounds on beta if fitting as a free parameter
+        param: alpha: shape parameter (usually fixed at value of 2)
+        param: alpha_bounds: bounds on alpha if fitting as free parameter. Must always be between [0,2]. 
+        """
+        self.a = a
+        self.a_bounds = a_bounds
+        self.beta = beta
+        self.beta_bounds = beta_bounds
+        self.alpha = alpha
+        self.alpha_bounds = alpha_bounds
+        self.params = ['a','beta','alpha']
+        self.name = 'CauCovFun'
+        super().__init__()
+    
+    def cov(self,h):
+        """
+        Return value of covariance function
+        param: h: value of spatial or temporal distance between points
+        """
+        self.verify_all_fixed()
+        c = (1 + h**self.alpha/self.a**self.alpha)**(-self.beta/self.alpha)
+        return c
+    
+class MatCovFun(CovFun):
+    """
+    Matern covariance function class (child class of CovFun)
+    """
+    def __init__(self,a=None,a_bounds=(0,10),v=None,v_bounds=(0,10)):
+        """
+        param: a: scale parameter determining speed at which spatial / temporal dependence decays
+        param: a_bounds: bounds on a if fitting as a free parameter
+        param: v: Order of modified bessel function of the second kind
+        param: v_bounds: Bounds on order of modified bessel function of the second kind
+        """
+        self.a = a
+        self.a_bounds = a_bounds
+        self.v = v
+        self.v_bounds = v_bounds
+        self.params = ['a','v']
+        self.name = 'MatCovFun'
+        super().__init__()
+    
+    def cov(self,h):
+        """
+        Return value of covariance function
+        param: h: value of spatial or temporal distance between points
+        """
+        self.verify_all_fixed()
+        c = (h/self.a)**self.v*special.kv(self.v,h/self.a)/(2**(self.v-1)*special.gamma(self.v))
+        return c
+    
+### *** SPACE-TIME COVARIANCE MODELS *** ###
+    
+class STCovFun:
+    """
+    Parent class used to define shared methods of difference space-time covariance models
+    """
+    
+    def __init__(self,Cs,Ct):
         """
         param: Cs: spatial component of covariance function
         param: Ct: temporal component of covariance function 
-        param: k1: coefficient of product term
-        param: k2: coefficient of spatial term
-        param: k3: coefficient of temporal term
-        param: k1_bounds: bounds on k1 if fitting as a free parameter
-        param: k2_bounds: bounds on k2 if fitting as a free parameter
-        param: k3_bounds: bounds on k3 if fitting as a free parameter
-        param: k1_guess: initial guess for k1 if fitting as a free parameter
-        param: k2_guess: initial guess for k2 if fitting as a free parameter
-        param: k3_guess: initial guess for k3 if fitting as a free parameter
         """
-        
         self.Cs = Cs
         self.Ct = Ct
-        self.k1 = k1
-        self.k2 = k2
-        self.k3 = k3
-        self.k1_bounds = k1_bounds
-        self.k2_bounds = k2_bounds
-        self.k3_bounds = k3_bounds
-        self.k1_guess = k1_guess
-        self.k2_guess = k2_guess
-        self.k3_guess = k3_guess
-        self.params = ['k1','k2','k3']
-        self.name = 'ProductSumSTCovFun'
         self.determine_param_status()
         
     def determine_param_status(self):
@@ -151,18 +247,16 @@ class ProductSumSTCovFun:
                 
         return None
     
-    def get_bounds_and_initial_guess(self):
+    def get_bounds(self):
         """
         Get bounds and initial guesses for free parameters 
         """
-        bounds = []
-        initial_guess = []
+        bounds = []        
         
         for param in self.spacetime_free_params:
             bounds.append(getattr(self,param + '_bounds'))
-            initial_guess.append(getattr(self,param + '_guess'))
         
-        return(bounds,initial_guess)
+        return(bounds)
     
     def update_spacetime_params(self,**kwargs):
         """
@@ -190,14 +284,9 @@ class ProductSumSTCovFun:
         self.Ct.update_params(**kwargs)
         self.determine_param_status()
         return None
+    
+    def verify_all_fixed(self):
         
-    def cov(self,hs,ht):
-        """
-        Return value of covariance function
-        param: hs: value of spatial distance between points
-        param: ht: value of temporal distance between points
-        """
-
         if not self.all_fixed:
             spacetime_free_params = ', '.join(self.spacetime_free_params)
             spatial_free_params = ', '.join(self.Cs.free_params)
@@ -208,9 +297,7 @@ class ProductSumSTCovFun:
             message += f'Temporal component ({self.Ct.name}): {temporal_free_params}'
             raise ValueError(message)
             
-        c = self.k1*self.Cs.cov(hs)*self.Ct.cov(ht) + self.k2*self.Cs.cov(hs) + self.k3*self.Ct.cov(ht)
-        
-        return c
+        return None
     
     def vgm(self,hs,ht):
         """
@@ -221,8 +308,47 @@ class ProductSumSTCovFun:
         v = self.cov(0,0) - self.cov(hs,ht)
         return v
     
+class ProductSumSTCovFun(STCovFun):
+    """
+    Product-sum space-time covariance model (child class of STCovFun). 
+    Described in detail by De Iaco, Myers, and Posa (doi:10.1016/S0167-7152(00)00200-5).
+    """
     
-def fit_covariance_model(Cst,hs,ht,gamma,w=None):
+    def __init__(self,Cs,Ct,k1=None,k2=None,k3=None,k1_bounds=(0,10),k2_bounds=(0,10),k3_bounds=(0,10)):
+        """
+        param: Cs: spatial component of covariance function
+        param: Ct: temporal component of covariance function 
+        param: k1: coefficient of product term
+        param: k2: coefficient of spatial term
+        param: k3: coefficient of temporal term
+        param: k1_bounds: bounds on k1 if fitting as a free parameter
+        param: k2_bounds: bounds on k2 if fitting as a free parameter
+        param: k3_bounds: bounds on k3 if fitting as a free parameter
+        """
+        
+        self.k1 = k1
+        self.k2 = k2
+        self.k3 = k3
+        self.k1_bounds = k1_bounds
+        self.k2_bounds = k2_bounds
+        self.k3_bounds = k3_bounds
+        self.params = ['k1','k2','k3']
+        self.name = 'ProductSumSTCovFun'
+        super().__init__(Cs,Ct)
+    
+    def cov(self,hs,ht):
+        """
+        Return value of covariance function
+        param: hs: value of spatial distance between points
+        param: ht: value of temporal distance between points
+        """
+        self.verify_all_fixed()
+        c = self.k1*self.Cs.cov(hs)*self.Ct.cov(ht) + self.k2*self.Cs.cov(hs) + self.k3*self.Ct.cov(ht)
+        return c
+
+### *** VARIOGRAM PARAMETER ESTIMATION FUNCTIONS *** ###
+    
+def fit_covariance_model(Cst,hs,ht,gamma,w=None,options={}):
     """
     Fit free parameters to empirical variogram data using weighted sum of squares.
 
@@ -231,6 +357,7 @@ def fit_covariance_model(Cst,hs,ht,gamma,w=None):
     param: ht: numpy array of temporal distances (vector of length n)
     param: gamma: numpy array of empirical variogram values (vector of length n)
     param: w: numpy array of weights (vector of length n)
+    param: options: optional dict of kwargs to pass to optimizer (see scipy.optimize.differential_evolution documentation)
     """
 
     # Empirical variogram function returns 2-D arrays, 
@@ -282,12 +409,11 @@ def fit_covariance_model(Cst,hs,ht,gamma,w=None):
     param_idx_dict['temporal_idx'] = {value:i+nstp+nsp for i,value in enumerate(temporal_free_params)}
     
     # Set up bounds on parameters
-    spacetime_bounds,spacetime_theta0 = Cst.get_bounds_and_initial_guess()
-    spatial_bounds,spatial_theta0 = Cst.Cs.get_bounds_and_initial_guess()
-    temporal_bounds,temporal_theta0 = Cst.Ct.get_bounds_and_initial_guess()
+    spacetime_bounds = Cst.get_bounds()
+    spatial_bounds = Cst.Cs.get_bounds()
+    temporal_bounds = Cst.Ct.get_bounds()
     
     bounds = spacetime_bounds + spatial_bounds + temporal_bounds
-    theta0 = spacetime_theta0 + spatial_theta0 + temporal_theta0
     
     # Define objective function
     def objective_function(theta):
@@ -308,7 +434,7 @@ def fit_covariance_model(Cst,hs,ht,gamma,w=None):
         
         return(weighted_squared_error)
     
-    res = so.differential_evolution(objective_function,bounds)
+    res = so.differential_evolution(objective_function,bounds,**options)
     
     if res.success:
         theta_hat = res.x
