@@ -1,16 +1,12 @@
 import numpy as np
 import scipy.stats as stats
 import scipy.spatial as spatial
+import scipy.sparse as sparse
 import scipy.special as special
 import scipy.optimize as so
+import sklearn.metrics as metrics
 import pandas as pd
 import geopandas as gpd
-
-# SphCovFun
-# ExpCovFun
-# GauCovFun
-# CauCovFun
-# MatCovFun
 
 ### *** COVARIANCE FUNCTION BUILDING BLOCKS *** ###
 
@@ -180,34 +176,6 @@ class CauCovFun(CovFun):
         c = (1 + h**self.alpha/self.a**self.alpha)**(-self.beta/self.alpha)
         return c
     
-class MatCovFun(CovFun):
-    """
-    Matern covariance function class (child class of CovFun)
-    """
-    def __init__(self,a=None,a_bounds=(0,10),v=None,v_bounds=(0,10)):
-        """
-        param: a: scale parameter determining speed at which spatial / temporal dependence decays
-        param: a_bounds: bounds on a if fitting as a free parameter
-        param: v: Order of modified bessel function of the second kind
-        param: v_bounds: Bounds on order of modified bessel function of the second kind
-        """
-        self.a = a
-        self.a_bounds = a_bounds
-        self.v = v
-        self.v_bounds = v_bounds
-        self.params = ['a','v']
-        self.name = 'MatCovFun'
-        super().__init__()
-    
-    def cov(self,h):
-        """
-        Return value of covariance function
-        param: h: value of spatial or temporal distance between points
-        """
-        self.verify_all_fixed()
-        c = (h/self.a)**self.v*special.kv(self.v,h/self.a)/(2**(self.v-1)*special.gamma(self.v))
-        return c
-    
 ### *** SPACE-TIME COVARIANCE MODELS *** ###
     
 class STCovFun:
@@ -314,25 +282,31 @@ class ProductSumSTCovFun(STCovFun):
     Described in detail by De Iaco, Myers, and Posa (doi:10.1016/S0167-7152(00)00200-5).
     """
     
-    def __init__(self,Cs,Ct,k1=None,k2=None,k3=None,k1_bounds=(0,10),k2_bounds=(0,10),k3_bounds=(0,10)):
+    def __init__(self,Cs,Ct,
+                 k1=None,k2=None,k3=None,nugget=None,
+                 k1_bounds=(0,10),k2_bounds=(0,10),k3_bounds=(0,10),nugget_bounds=(0,10)):
         """
         param: Cs: spatial component of covariance function
-        param: Ct: temporal component of covariance function 
+        param: Ct: temporal component of covariance function
         param: k1: coefficient of product term
         param: k2: coefficient of spatial term
         param: k3: coefficient of temporal term
+        param: nugget: value of nugget effect
         param: k1_bounds: bounds on k1 if fitting as a free parameter
         param: k2_bounds: bounds on k2 if fitting as a free parameter
         param: k3_bounds: bounds on k3 if fitting as a free parameter
+        param: nugget_bounds: bounds on nugget effect if fitting as a free parameter
         """
         
         self.k1 = k1
         self.k2 = k2
         self.k3 = k3
+        self.nugget = nugget
         self.k1_bounds = k1_bounds
         self.k2_bounds = k2_bounds
         self.k3_bounds = k3_bounds
-        self.params = ['k1','k2','k3']
+        self.nugget_bounds = nugget_bounds
+        self.params = ['k1','k2','k3','nugget']
         self.name = 'ProductSumSTCovFun'
         super().__init__(Cs,Ct)
     
@@ -343,7 +317,8 @@ class ProductSumSTCovFun(STCovFun):
         param: ht: value of temporal distance between points
         """
         self.verify_all_fixed()
-        c = self.k1*self.Cs.cov(hs)*self.Ct.cov(ht) + self.k2*self.Cs.cov(hs) + self.k3*self.Ct.cov(ht)
+        nugget_effect = self.nugget*(1-np.sign(hs))*(1-np.sign(ht))
+        c = nugget_effect + self.k1*self.Cs.cov(hs)*self.Ct.cov(ht) + self.k2*self.Cs.cov(hs) + self.k3*self.Ct.cov(ht)
         return c
 
 ### *** VARIOGRAM PARAMETER ESTIMATION FUNCTIONS *** ###
@@ -351,6 +326,8 @@ class ProductSumSTCovFun(STCovFun):
 def fit_covariance_model(Cst,hs,ht,gamma,w=None,options={}):
     """
     Fit free parameters to empirical variogram data using weighted sum of squares.
+    
+    Based on section 2.6.2 of "Geostatistics: Modeling Spatial Uncertainty" by J.P Chiles. 
 
     param: Cst: space-time covariance model that includes free parameters (e.g., instance of ProductSumSTCovFun class)
     param: hs: numpy array of spatial distances (vector of length n)
@@ -396,7 +373,7 @@ def fit_covariance_model(Cst,hs,ht,gamma,w=None,options={}):
     else:
         tp_string = '--'
     
-    message = 'Estimating the following parameters via weighted least squares:\n'
+    message = 'Estimating the following variogram parameters via least squares:\n'
     message += f'    Space-time covariance model ({Cst.name}): {stp_string}\n'
     message += f'    Spatial component ({Cst.Cs.name}): {sp_string}\n'
     message += f'    Temporal component ({Cst.Ct.name}): {tp_string}'
@@ -430,7 +407,7 @@ def fit_covariance_model(Cst,hs,ht,gamma,w=None,options={}):
         gamma_hat = Cst.vgm(hs,ht)
         
         # Get weighted squared error vs empirical variogram
-        weighted_squared_error = np.sum(w*(gamma_hat - gamma)**2)/sum_w
+        weighted_squared_error = np.sum(w*(gamma - gamma_hat)**2)/sum_w
         
         return(weighted_squared_error)
     
@@ -482,76 +459,226 @@ def fit_covariance_model(Cst,hs,ht,gamma,w=None,options={}):
     
     return(return_object,status)
 
-def empirical_variogram(z,xy,t,spatial_lags,temporal_lags):
+### *** HELPER FUNCTIONS FOR WORKING WITH SPARSE DISTANCE MATRICES *** ###
+
+def apply_covariance_sparse(Cst,spatial_dmat,temporal_dmat,adjmat):
     """
-    param: z: samples drawn from a space-time random field (vector of length n)
-    param: xy: x-y coordinates associated with samples (n x 2 array)
-    param: t: time values associated with samples (vector of length n)
-    param: spatial_lags: edges of spatial lag bins (vector of length ns). Max value is used as spatial cutoff.
-    param: temporal_lags: edges of temporal lag bins (vector of length nt). Max value is used as temporal cutoff.
+    Calculate the values of the covariance model given sparse distance matrices. 
+    
+    param: Cst: fitted space-time covariance function (instance of STCovFun)
+    param: spatial_dmat: sparse spatial distance matrix (n x m)
+    param: temporal_dmat: sparse temporal distance matrix (n x m)
+    param: adjmat: sparse binary adjacency matrix. Values of 1 denote pairs within spatial / temporal cutoff range. 
+    returns: cmat: sparse matrix of covariance function values 
+    """
+    rows,cols = adjmat.nonzero()
+    hs = spatial_dmat[rows,cols]
+    ht = temporal_dmat[rows,cols].flatten()
+    
+    values = Cst.cov(hs,ht)
+    cmat = sparse.csr_array((values,(rows,cols)),shape=adjmat.shape)
+    return(cmat)
+
+class RegressionKriging:
+    """
+    Regression kriging class
     """
     
-    # Ensure lags are sorted and all positive. 
-    spatial_lags = np.sort(spatial_lags[spatial_lags >= 0])
-    temporal_lags = np.sort(temporal_lags[temporal_lags >= 0])
+    def __init__(self,hard_points,krig_points,response_variable,features,
+                 spatial_column='geometry',temporal_column='time_val'):
+        """
+        param: hard_points: geodataframe of "hard" observations (i.e., realizations of space-time random field)
+        param: krig_points: geodataframe of points to be interpolated via kriging
+        param: response_variable: column name corresponding to outcome of interest (z)
+        param: features: list of predictor variables to use when modeling mean trend
+        param: spatial_column: column name corresponding to pandas geoseries of point coordinates
+        param: temporal_column: column name corresponding to time values. Must be numeric (e.g., # days since 2000).  
+        """
+        
+        self.features = [f for f in features if f != response_variable and f != hard_points.index.name]
+        self.response_variable = response_variable
+        
+        self.n_h = len(hard_points)
+        self.n_k = len(krig_points)
+        
+        self.xy_h = np.zeros((self.n_h,2))
+        self.xy_h[:,0] = hard_points[spatial_column].x
+        self.xy_h[:,1] = hard_points[spatial_column].y
+        
+        self.xy_k = np.zeros((self.n_k,2))
+        self.xy_k[:,0] = krig_points[spatial_column].x
+        self.xy_k[:,1] = krig_points[spatial_column].y
+        
+        self.t_h = hard_points[temporal_column].to_numpy()
+        self.t_k = krig_points[temporal_column].to_numpy()
+        
+        self.X_h = hard_points[features].to_numpy()
+        self.y_h = hard_points[response_variable].to_numpy()
+        
+        self.X_k = krig_points[features].to_numpy()
+        
+        self.Cst = None
+        
+    def build_distance_matrices(self,spatial_cutoff,temporal_cutoff):
+        """
+        Create KDTrees for fast spatial indexing and construct spatial / temporal distance matrices.
+        
+        param: spatial_cutoff: spatial distance beyond which correlation is assumed to be zero
+        param: temporal_cutoff: temporal distance beyond which correlation is assumed to be zero
+        """
+        
+        self.spatial_cutoff = spatial_cutoff
+        self.temporal_cutoff = temporal_cutoff
+        
+        self.kd_tree_h = spatial.KDTree(self.xy_h)
+        self.kd_tree_k = spatial.KDTree(self.xy_k)
+        
+        # Find spatial pairs that are within cutoff distance
+        self.pairs_hh = self.kd_tree_h.query_pairs(r=self.spatial_cutoff,output_type='ndarray')
+
+        # Compute temporal distance for potential pairs
+        self.pairs_hh_temporal_distance = np.abs(self.t_h[self.pairs_hh[:,0]] - self.t_h[self.pairs_hh[:,1]])
+        
+        # Drop pairs that do not fall within temporal cutoff
+        m = (self.pairs_hh_temporal_distance < self.temporal_cutoff)
+        self.pairs_hh = self.pairs_hh[m]
+        self.pairs_hh_temporal_distance = self.pairs_hh_temporal_distance[m]
+        
+        left = self.pairs_hh[:,0]
+        right = self.pairs_hh[:,1]
+        
+        self.pairs_hh_spatial_distance = np.sum((self.xy_h[left] - self.xy_h[right])**2,axis=1)**0.5
+        
+        # Create sparse adjacency and distance matrices
+        self.adjmat_hh = sparse.csr_array((np.ones(len(left),dtype=np.int8),(left,right)),shape=(self.n_h,self.n_h))
+        self.adjmat_hh += self.adjmat_hh.T
+        self.adjmat_hh += sparse.eye(self.n_h)
+        
+        self.spatial_dmat_hh = sparse.csr_array((self.pairs_hh_spatial_distance,(left,right)),shape=(self.n_h,self.n_h))
+        self.spatial_dmat_hh += self.spatial_dmat_hh.T
+        
+        self.temporal_dmat_hh = sparse.csr_array((self.pairs_hh_temporal_distance,(left,right)),shape=(self.n_h,self.n_h))
+        self.temporal_dmat_hh += self.temporal_dmat_hh.T
+        
+        # Get relevant k-h pairs
+        pairs_kh = self.kd_tree_k.query_ball_tree(self.kd_tree_h,self.spatial_cutoff)
+        
+        self.adjmat_kh = sparse.dok_array((self.n_k, self.n_h), dtype=np.int8)
+        self.spatial_dmat_kh = sparse.dok_array((self.n_k, self.n_h), dtype=float)
+        self.temporal_dmat_kh = sparse.dok_array((self.n_k, self.n_h), dtype=float)
+        
+        for k,h_matches in enumerate(pairs_kh):
+            for h in h_matches:
+                spatial_distance = np.sum((self.xy_k[k] - self.xy_h[h])**2)**0.5
+                temporal_distance = np.abs(self.t_k[k] - self.t_h[h])
+                if temporal_distance < self.temporal_cutoff:
+                    self.adjmat_kh[k,h] = 1
+                    self.spatial_dmat_kh[k,h] = spatial_distance
+                    self.temporal_dmat_kh[k,h] = temporal_distance
+                    
+        self.adjmat_kh = self.adjmat_kh.tocsr()
+        self.spatial_dmat_kh = self.spatial_dmat_kh.tocsr()
+        self.temporal_dmat_kh = self.temporal_dmat_kh.tocsr()
+        
+        return(None)
     
-    # Define cutoff spatial / temporal distances. 
-    # We won't consider any pairwise combinations that are more than this far apart in space or time.
-    spatial_cutoff = np.max(spatial_lags)
-    temporal_cutoff = np.max(temporal_lags)
+    def estimate_mean_trend(self,model):
+        """
+        Estimate the mean trend of the response variable as a function of predictor variables
+        
+        param: model: a scikit-learn model (e.g., LinearRegression, RandomForest)
+        """
+        # Fit model
+        self.model = model.fit(self.X_h,self.y_h)
+        
+        # Get hedonic residual 
+        y_pred = model.predict(self.X_h)
+        
+        self.z = self.y_h - y_pred
+        
+        # Get R^2 score
+        R2 = np.round(metrics.r2_score(self.y_h,y_pred),2)
+        residual_mean = np.round(np.mean(self.z),6)
+        
+        formula = f'\n{self.response_variable} ~ {self.features[0]}'
+        whitespace = len(self.response_variable)*' '
+        formula += f'\n{whitespace} + '.join(self.features[1:])
+        
+        print(f'Estimating mean trend based on following regression:\n    {formula}')
+        print(f'\nR²={R2}, residual mean trend={residual_mean}\n')
+        
+        return(None)
     
-    # Create KDTree that we can use for fast spatial indexing
-    spatial_kd_tree = spatial.KDTree(xy)
-    
-    # Find spatial pairs that are within cutoff distance
-    spatial_pairs = spatial_kd_tree.query_pairs(r=spatial_cutoff,output_type='ndarray')
-    
-    # Compute temporal distance for potential pairs
-    temporal_distance = np.abs(t[spatial_pairs[:,0]] - t[spatial_pairs[:,1]])
-    
-    # Drop pairs that do not fall within temporal cutoff
-    m = (temporal_distance < temporal_cutoff)
-    pairs = spatial_pairs[m]
-    
-    # Compute spatial / temporal distance and squared difference in sampled value of z
-    temporal_distance = temporal_distance[m]
-    spatial_distance = np.sum((xy[pairs[:,0]] - xy[pairs[:,1]])**2,axis=1)**0.5
-    squared_difference = (z[pairs[:,0]] - z[pairs[:,1]])**2
-    
-    # Get spatial and temporal bin of distances
-    spatial_bin = np.digitize(spatial_distance,spatial_lags)
-    temporal_bin = np.digitize(temporal_distance,temporal_lags)
-    
-    num_spatial_lags = len(spatial_lags)
-    num_temporal_lags = len(temporal_lags)
-    num_sbin = num_spatial_lags - 1
-    num_tbin = num_temporal_lags - 1
-    
-    # Pre-allocate arrays used to store output describing semivariogram
-    gamma_value = np.zeros((num_sbin,num_tbin))
-    num_pairs = np.zeros((num_sbin,num_tbin))
-    sbin_center = np.zeros((num_sbin,num_tbin))
-    sbin_mean = np.zeros((num_sbin,num_tbin))
-    tbin_center = np.zeros((num_sbin,num_tbin))
-    tbin_mean = np.zeros((num_sbin,num_tbin))
-    
-    for i,sbin in enumerate(np.arange(1,num_spatial_lags)):
-        for j,tbin in enumerate(np.arange(1,num_temporal_lags)):
+    def estimate_variogram(self,Cst,spatial_lags,temporal_lags,options={}):
+        """
+        param: Cst: space-time covariance model that includes free parameters (e.g., instance of ProductSumSTCovFun class)
+        param: spatial_lags: edges of spatial lag bins (vector of length ns). Max value is used as spatial cutoff.
+        param: temporal_lags: edges of temporal lag bins (vector of length nt). Max value is used as temporal cutoff.
+        param: options: optional dict of kwargs to pass to optimizer 
+        (see scipy.optimize.differential_evolution documentation)
+        """
+        
+        left = self.pairs_hh[:,0]
+        right = self.pairs_hh[:,1]
+        hs = self.pairs_hh_spatial_distance
+        ht = self.pairs_hh_temporal_distance
+        gamma_vector = 0.5*(self.z[left] - self.z[right])**2
+        
+        # Ensure lags are sorted and all positive. 
+        spatial_lags = np.sort(spatial_lags[(spatial_lags >= 0)&(spatial_lags <= self.spatial_cutoff)])
+        temporal_lags = np.sort(temporal_lags[(temporal_lags >= 0)&(temporal_lags <= self.temporal_cutoff)])
+        
+        # Get spatial and temporal bin of distances
+        hs_bin = np.digitize(hs,spatial_lags)
+        ht_bin = np.digitize(ht,temporal_lags)
+
+        num_spatial_lags = len(spatial_lags)
+        num_temporal_lags = len(temporal_lags)
+        num_sbin = num_spatial_lags - 1
+        num_tbin = num_temporal_lags - 1
+
+        # Pre-allocate arrays used to store output describing semivariogram
+        gamma_bin = np.zeros((num_sbin,num_tbin))
+        num_pairs = np.zeros((num_sbin,num_tbin))
+        hs_center = np.zeros((num_sbin,num_tbin))
+        hs_mean = np.zeros((num_sbin,num_tbin))
+        ht_center = np.zeros((num_sbin,num_tbin))
+        ht_mean = np.zeros((num_sbin,num_tbin))
+
+        for i,sbin in enumerate(np.arange(1,num_spatial_lags)):
+            for j,tbin in enumerate(np.arange(1,num_temporal_lags)):
+
+                # Select pairs that fall within space-time bin
+                m = (hs_bin == sbin)&(ht_bin == tbin)
+                num_pairs[i,j] = np.sum(m)
+
+                # Calculate value of semivariogram within bin 
+                gamma_bin[i,j] = np.sum(gamma_vector[m])/(num_pairs[i,j])
+
+                # Record bin centers
+                hs_center[i,j] = (spatial_lags[i] + spatial_lags[i+1])/2
+                ht_center[i,j] = (temporal_lags[j] + temporal_lags[j+1])/2
+
+                # Record mean spatial and temporal distance separating pairs within bin
+                hs_mean[i,j] = np.mean(hs[m])
+                ht_mean[i,j] = np.mean(ht[m])
+        
+        # Fit the covariange model to the empirical variogram 
+        Cst,status = fit_covariance_model(Cst,hs_mean,ht_mean,gamma_bin,w=num_pairs,options=options)
+        
+        if status == 'converged':
+            self.Cst = Cst
             
-            # Select pairs that fall within space-time bin
-            m = (spatial_bin == sbin)&(temporal_bin == tbin)
-            num_pairs[i,j] = np.sum(m)
-            
-            # Calculate value of semivariogram within bin 
-            gamma_value[i,j] = np.sum(squared_difference[m])/(2*num_pairs[i,j])
-            
-            # Record bin centers
-            sbin_center[i,j] = (spatial_lags[i] + spatial_lags[i+1])/2
-            tbin_center[i,j] = (temporal_lags[j] + temporal_lags[j+1])/2
-            
-            # Record mean spatial and temporal distance separating pairs within bin
-            sbin_mean[i,j] = np.mean(spatial_distance[m])
-            tbin_mean[i,j] = np.mean(temporal_distance[m])
-    
-    return(gamma_value,num_pairs,sbin_center,sbin_mean,tbin_center,tbin_mean)
+        empirical_variogram = {'gamma_bin':gamma_bin,
+                               'num_pairs':num_pairs,
+                               'hs_center':hs_center,
+                               'hs_mean':hs_mean,
+                               'ht_center':ht_center,
+                               'ht_mean':ht_mean}
+        
+        self.empirical_variogram = empirical_variogram
+                    
+        return(None)
+        
+        
 
