@@ -7,6 +7,7 @@ import scipy.optimize as so
 import sklearn.metrics as metrics
 import pandas as pd
 import geopandas as gpd
+import time
 
 ### *** COVARIANCE FUNCTION BUILDING BLOCKS *** ###
 
@@ -276,6 +277,80 @@ class STCovFun:
         v = self.cov(0,0) - self.cov(hs,ht)
         return v
     
+class ProductSTCovFun(STCovFun):
+    """
+    Product (separable) space-time covariance model (child class of STCovFun). 
+    """
+    
+    def __init__(self,Cs,Ct,k=None,nugget=None,k_bounds=(0,10),nugget_bounds=(0,10)):
+        """
+        param: Cs: spatial component of covariance function
+        param: Ct: temporal component of covariance function
+        param: k: value of sill
+        param: nugget: value of nugget effect
+        param: k_bounds: bounds on k1 if fitting as a free parameter
+        param: nugget_bounds: bounds on nugget effect if fitting as a free parameter
+        """
+        
+        self.k = k
+        self.nugget = nugget
+        self.k_bounds = k_bounds
+        self.nugget_bounds = nugget_bounds
+        self.params = ['k','nugget']
+        self.name = 'ProductSTCovFun'
+        super().__init__(Cs,Ct)
+    
+    def cov(self,hs,ht):
+        """
+        Return value of covariance function
+        param: hs: value of spatial distance between points
+        param: ht: value of temporal distance between points
+        """
+        self.verify_all_fixed()
+        nugget_effect = self.nugget*(1-np.abs(np.sign(hs)))*(1-np.abs(np.sign(ht)))
+        c = nugget_effect + self.k*self.Cs.cov(hs)*self.Ct.cov(ht)
+        return c
+    
+class SumSTCovFun(STCovFun):
+    """
+    Sum (linear) space-time covariance model (child class of STCovFun).
+    """
+    
+    def __init__(self,Cs,Ct,
+                 k1=None,k2=None,nugget=None,
+                 k1_bounds=(0,10),k2_bounds=(0,10),nugget_bounds=(0,10)):
+        """
+        param: Cs: spatial component of covariance function
+        param: Ct: temporal component of covariance function
+        param: k1: coefficient of spatial term
+        param: k2: coefficient of temporal term
+        param: nugget: value of nugget effect
+        param: k1_bounds: bounds on k1 if fitting as a free parameter
+        param: k2_bounds: bounds on k2 if fitting as a free parameter
+        param: nugget_bounds: bounds on nugget effect if fitting as a free parameter
+        """
+        
+        self.k1 = k1
+        self.k2 = k2
+        self.nugget = nugget
+        self.k1_bounds = k1_bounds
+        self.k2_bounds = k2_bounds
+        self.nugget_bounds = nugget_bounds
+        self.params = ['k1','k2','nugget']
+        self.name = 'SumSTCovFun'
+        super().__init__(Cs,Ct)
+    
+    def cov(self,hs,ht):
+        """
+        Return value of covariance function
+        param: hs: value of spatial distance between points
+        param: ht: value of temporal distance between points
+        """
+        self.verify_all_fixed()
+        nugget_effect = self.nugget*(1-np.abs(np.sign(hs)))*(1-np.abs(np.sign(ht)))
+        c = nugget_effect + self.k1*self.Cs.cov(hs) + self.k2*self.Ct.cov(ht)
+        return c
+    
 class ProductSumSTCovFun(STCovFun):
     """
     Product-sum space-time covariance model (child class of STCovFun). 
@@ -317,7 +392,7 @@ class ProductSumSTCovFun(STCovFun):
         param: ht: value of temporal distance between points
         """
         self.verify_all_fixed()
-        nugget_effect = self.nugget*(1-np.sign(hs))*(1-np.sign(ht))
+        nugget_effect = self.nugget*(1-np.abs(np.sign(hs)))*(1-np.abs(np.sign(ht)))
         c = nugget_effect + self.k1*self.Cs.cov(hs)*self.Ct.cov(ht) + self.k2*self.Cs.cov(hs) + self.k3*self.Ct.cov(ht)
         return c
 
@@ -459,8 +534,7 @@ def fit_covariance_model(Cst,hs,ht,gamma,w=None,options={}):
     
     return(return_object,status)
 
-### *** HELPER FUNCTIONS FOR WORKING WITH SPARSE DISTANCE MATRICES *** ###
-
+# Helper function for working with sparse distance matrices
 def apply_covariance_sparse(Cst,spatial_dmat,temporal_dmat,adjmat):
     """
     Calculate the values of the covariance model given sparse distance matrices. 
@@ -479,6 +553,17 @@ def apply_covariance_sparse(Cst,spatial_dmat,temporal_dmat,adjmat):
     cmat = sparse.csr_array((values,(rows,cols)),shape=adjmat.shape)
     return(cmat)
 
+# Helper function to format elapsed time in seconds
+def format_elapsed_time(seconds):
+    seconds = int(np.round(seconds))
+    hours = seconds // 3600
+    seconds = seconds - hours*3600
+    minutes = seconds // 60
+    seconds = seconds - minutes*60
+    return(f'{hours}h:{minutes:02d}m:{seconds:02d}s')
+
+
+### *** REGRESSION KRIGING CLASS *** ###
 class RegressionKriging:
     """
     Regression kriging class
@@ -591,17 +676,18 @@ class RegressionKriging:
         # Fit model
         self.model = model.fit(self.X_h,self.y_h)
         
-        # Get hedonic residual 
+        # Get residual 
         y_pred = model.predict(self.X_h)
         
-        self.z = self.y_h - y_pred
+        self.z_h = self.y_h - y_pred
         
         # Get R^2 score
         R2 = np.round(metrics.r2_score(self.y_h,y_pred),2)
-        residual_mean = np.round(np.mean(self.z),6)
+        residual_mean = np.round(np.mean(self.z_h),6)
         
         formula = f'\n{self.response_variable} ~ {self.features[0]}'
         whitespace = len(self.response_variable)*' '
+        formula += f'\n{whitespace} + '
         formula += f'\n{whitespace} + '.join(self.features[1:])
         
         print(f'Estimating mean trend based on following regression:\n    {formula}')
@@ -622,7 +708,7 @@ class RegressionKriging:
         right = self.pairs_hh[:,1]
         hs = self.pairs_hh_spatial_distance
         ht = self.pairs_hh_temporal_distance
-        gamma_vector = 0.5*(self.z[left] - self.z[right])**2
+        gamma_vector = 0.5*(self.z_h[left] - self.z_h[right])**2
         
         # Ensure lags are sorted and all positive. 
         spatial_lags = np.sort(spatial_lags[(spatial_lags >= 0)&(spatial_lags <= self.spatial_cutoff)])
@@ -679,6 +765,100 @@ class RegressionKriging:
         self.empirical_variogram = empirical_variogram
                     
         return(None)
+    
+    
+    
+    def krig_values(self,n_max=1000,cap=True):
+        """
+        Perform simple kriging of the residuals of the fit regression model. Next, combine with the deterministic part 
+        mean trend estimated via regression to create final estimates at kriging points. 
         
+        param: n_max: maximum number of neighbors to include in kriging weight calculation. This is to reduce the 
+        computational burden of inverting the Chh covariance matrix. For each kriging point, the n_max neighbors with 
+        the highest covariance values will be selected. 
+        param: n_std_max: Maximum number of standard deviations from zero that a krigged residual error can be
+        param: cap: If true, make it so that the min/max kriged residual falls with in same range as the hard point residuals. 
+        """
+
+        # Get covariance matrices (note that these are scipy sparse CSR arrays)
+        cov_hh = apply_covariance_sparse(self.Cst,self.spatial_dmat_hh,self.temporal_dmat_hh,self.adjmat_hh)
+        cov_kh = apply_covariance_sparse(self.Cst,self.spatial_dmat_kh,self.temporal_dmat_kh,self.adjmat_kh)
+        
+        self.z_k = np.nan*np.ones(self.n_k)
+        self.sigma_k = np.nan*np.ones(self.n_k)
+        
+        # Get variance of residuals
+        sigma_kk = np.sqrt(self.Cst.cov(0,0))
+        
+        print('\nInterpolating residuals via simple kriging:')
+        
+        progress_step = np.ceil(0.1*self.n_k)
+        update_progress = np.arange(self.n_k) % progress_step == 0
+        update_progress[0] = False
+        update_progress[-1] = True
+        
+        t1 = time.time()
+        
+        for k in range(self.n_k):
+
+            # Create Ckh and Chh covariance matrices
+            extra,cols = cov_kh[[k]].nonzero()
+            
+            if len(cols) > 0:
+            
+                data = cov_kh[[k]][[0],cols]
+                h_inds = cols[np.argsort(data)[-n_max:]]
+                n_h_included = len(h_inds)
+                Ckh = cov_kh[[k],h_inds].reshape(1,n_h_included)
+
+                Chh = np.zeros((n_h_included,n_h_included))
+                for i in range(n_h_included):
+                    for j in range(n_h_included):
+                        Chh[i,j] = cov_hh[h_inds[i],h_inds[j]]
+
+                # Get value of residuals at relevant hard points
+                z_h = self.z_h[h_inds]
+                z_h.shape = (n_h_included,1)
+
+                # Take inverse of Chh covariance matrix 
+                Chh_inv = np.linalg.inv(Chh)
+
+                # Get kriging estimate of z_k
+                self.z_k[k] = (Ckh @ Chh_inv @ z_h)[0,0]
+
+                # Get kriging standard deviation of z_k
+                self.sigma_k[k] = np.sqrt(sigma_kk**2 - (Ckh @ Chh_inv @ Ckh.T)[0,0])
+                
+            else:
+                self.z_k[k] = 0
+                self.sigma_k[k] = sigma_kk
+                
+            if update_progress[k]:
+                
+                t2 = time.time()
+                elapsed_time = format_elapsed_time(t2-t1)
+                progress = np.round(k/self.n_k*100,-1).astype(int)
+                
+                print(f'    {k+1} / {self.n_k} ({progress}%) complete: {elapsed_time} elapsed')
+              
+        if cap:
+            min_z_h = np.min(self.z_h)
+            max_z_h = np.max(self.z_h)
+            m1 = (self.z_k < min_z_h)
+            m2 = (self.z_k > max_z_h)
+
+            self.z_k[m1] = min_z_h
+            self.z_k[m2] = max_z_h
+            self.sigma_k[m1|m2] = np.nan
+            self.z_k_capped = (m1|m2)
+            
+        # Used kriged residuals to calculate quantity of interest at interpolation points
+        self.y_k = self.model.predict(self.X_k) + self.z_k        
+            
+        return(None)
+            
+            
+            
+            
         
 
