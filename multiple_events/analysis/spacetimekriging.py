@@ -2,9 +2,7 @@ import numpy as np
 import scipy.stats as stats
 import scipy.spatial as spatial
 import scipy.sparse as sparse
-import scipy.special as special
 import scipy.optimize as so
-import sklearn.metrics as metrics
 import pandas as pd
 import geopandas as gpd
 import time
@@ -563,25 +561,19 @@ def format_elapsed_time(seconds):
     return(f'{hours}h:{minutes:02d}m:{seconds:02d}s')
 
 
-### *** REGRESSION KRIGING CLASS *** ###
-class RegressionKriging:
+### *** KRIGING CLASSES *** ###
+class Kriging:
     """
-    Regression kriging class
+    Parent class used to define shared methods of different kriging approaches
     """
-    
-    def __init__(self,hard_points,krig_points,response_variable,features,
-                 spatial_column='geometry',temporal_column='time_val'):
+    def __init__(self,hard_points,krig_points,response_variable,spatial_column='geometry',temporal_column='time_val'):
         """
         param: hard_points: geodataframe of "hard" observations (i.e., realizations of space-time random field)
         param: krig_points: geodataframe of points to be interpolated via kriging
-        param: response_variable: column name corresponding to outcome of interest (z)
-        param: features: list of predictor variables to use when modeling mean trend
+        param: response_variable: column name corresponding to quantity of interest (z)
         param: spatial_column: column name corresponding to pandas geoseries of point coordinates
         param: temporal_column: column name corresponding to time values. Must be numeric (e.g., # days since 2000).  
         """
-        
-        self.features = [f for f in features if f != response_variable and f != hard_points.index.name]
-        self.response_variable = response_variable
         
         self.n_h = len(hard_points)
         self.n_k = len(krig_points)
@@ -597,11 +589,8 @@ class RegressionKriging:
         self.t_h = hard_points[temporal_column].to_numpy()
         self.t_k = krig_points[temporal_column].to_numpy()
         
-        self.X_h = hard_points[features].to_numpy()
-        self.y_h = hard_points[response_variable].to_numpy()
-        
-        self.X_k = krig_points[features].to_numpy()
-        
+        self.z_h = hard_points[response_variable].to_numpy()
+                
         self.Cst = None
         
     def build_distance_matrices(self,spatial_cutoff,temporal_cutoff):
@@ -621,11 +610,19 @@ class RegressionKriging:
         param: temporal_cutoff: temporal distance beyond which correlation is assumed to be zero
         """
         
+        t1 = time.time()
+        
+        print('\nBuilding spatial and temporal distance matrices:',flush=True)
+        
         self.spatial_cutoff = spatial_cutoff
         self.temporal_cutoff = temporal_cutoff
         
-        self.kd_tree_h = spatial.KDTree(self.xy_h)
-        self.kd_tree_k = spatial.KDTree(self.xy_k)
+        self.kd_tree_h = spatial.cKDTree(self.xy_h)
+        self.kd_tree_k = spatial.cKDTree(self.xy_k)
+        
+        t2 = time.time()
+        elapsed_time = format_elapsed_time(t2-t1)
+        print(f'    Finished building k-d trees: {elapsed_time} elapsed',flush=True)
         
         # Find spatial pairs that are within cutoff distance
         self.pairs_hh = self.kd_tree_h.query_pairs(r=self.spatial_cutoff,output_type='ndarray')
@@ -654,6 +651,10 @@ class RegressionKriging:
         self.temporal_dmat_hh = sparse.csr_array((self.pairs_hh_temporal_distance,(left,right)),shape=(self.n_h,self.n_h))
         self.temporal_dmat_hh += self.temporal_dmat_hh.T
         
+        t2 = time.time()
+        elapsed_time = format_elapsed_time(t2-t1)
+        print(f'    Finished building hard point matrices: {elapsed_time} elapsed',flush=True)
+        
         # Get relevant k-h pairs
         pairs_kh = self.kd_tree_k.query_ball_tree(self.kd_tree_h,self.spatial_cutoff)
         
@@ -674,33 +675,9 @@ class RegressionKriging:
         self.spatial_dmat_kh = self.spatial_dmat_kh.tocsr()
         self.temporal_dmat_kh = self.temporal_dmat_kh.tocsr()
         
-        return(None)
-    
-    def estimate_mean_trend(self,model):
-        """
-        Estimate the mean trend of the response variable as a function of predictor variables
-        
-        param: model: a scikit-learn model (e.g., LinearRegression, RandomForest)
-        """
-        # Fit model
-        self.model = model.fit(self.X_h,self.y_h)
-        
-        # Get residual 
-        y_pred = model.predict(self.X_h)
-        
-        self.z_h = self.y_h - y_pred
-        
-        # Get R^2 score
-        R2 = np.round(metrics.r2_score(self.y_h,y_pred),2)
-        residual_mean = np.round(np.mean(self.z_h),6)
-        
-        formula = f'\n{self.response_variable} ~ {self.features[0]}'
-        whitespace = len(self.response_variable)*' '
-        formula += f'\n{whitespace} + '
-        formula += f'\n{whitespace} + '.join(self.features[1:])
-        
-        print(f'Estimating mean trend based on following regression:\n    {formula}')
-        print(f'\nR²={R2}, residual mean trend={residual_mean}\n')
+        t2 = time.time()
+        elapsed_time = format_elapsed_time(t2-t1)
+        print(f'    Finished building krig point matrices: {elapsed_time} elapsed\n',flush=True)
         
         return(None)
     
@@ -775,10 +752,25 @@ class RegressionKriging:
                     
         return(None)
     
+class SimpleKriging(Kriging):
+    """
+    Simple kriging class (child class of Kriging)
+    """
+    def __init__(self,hard_points,krig_points,response_variable,mean_value=0.0,spatial_column='geometry',temporal_column='time_val'):
+        """
+        param: hard_points: geodataframe of "hard" observations (i.e., realizations of space-time random field)
+        param: krig_points: geodataframe of points to be interpolated via kriging
+        param: response_variable: column name corresponding to quantity of interest (z)
+        param: mean_value: known, constant, mean value of response variable throughout the study area
+        param: spatial_column: column name corresponding to pandas geoseries of point coordinates
+        param: temporal_column: column name corresponding to time values. Must be numeric (e.g., # days since 2000).  
+        """
+        self.m_z = mean_value
+        super().__init__(hard_points,krig_points,response_variable,spatial_column,temporal_column)
+        
     def krig_values(self,n_max=1000,n_min=100):
         """
-        Perform simple kriging of the residuals of the fit regression model. Next, combine with the deterministic part 
-        mean trend estimated via regression to create final estimates at kriging points. Assumes residuals have zero mean. 
+        Interpolate values via simple kringing. 
         
         param: n_max: maximum number of neighbors to include in kriging weight calculation. This is to reduce the 
         computational burden of inverting the Chh covariance matrix. For each kriging point, the n_max neighbors with 
@@ -802,7 +794,6 @@ class RegressionKriging:
         progress_step = np.ceil(0.1*self.n_k)
         update_progress = np.arange(self.n_k) % progress_step == 0
         update_progress[0] = False
-        update_progress[-1] = True
         
         t1 = time.time()
         
@@ -845,7 +836,7 @@ class RegressionKriging:
                 Ckh = cov_kh[[k],h_inds].reshape(1,n_h_included)
                 Chh = cov_hh[h_inds].toarray()[:,h_inds]
 
-                # Get value of residuals at relevant hard points
+                # Get value of z at relevant hard points
                 z_h = self.z_h[h_inds]
                 z_h.shape = (n_h_included,1)
 
@@ -856,7 +847,7 @@ class RegressionKriging:
                 Wkh = Ckh @ Chh_inv
                 
                 # Get kriging estimate of z_k
-                self.z_k[k] = (Wkh @ z_h)[0,0]
+                self.z_k[k] = self.m_z + (Wkh @ (z_h - self.m_z))[0,0]
 
                 # Get kriging standard deviation of z_k
                 self.sigma_k[k] = np.sqrt(sigma_kk**2 - (Wkh @ Ckh.T)[0,0])
@@ -871,15 +862,138 @@ class RegressionKriging:
                 elapsed_time = format_elapsed_time(t2-t1)
                 progress = np.round(k/self.n_k*100,-1).astype(int)
                 
-                print(f'    {k+1} / {self.n_k} ({progress}%) complete: {elapsed_time} elapsed',flush=True)
+                print(f'    {k} / {self.n_k} ({progress}%) complete: {elapsed_time} elapsed',flush=True)
+                
+        t2 = time.time()
+        elapsed_time = format_elapsed_time(t2-t1)
+        print(f'    {self.n_k} / {self.n_k} (100%) complete: {elapsed_time} elapsed',flush=True)
             
-        # Used kriged residuals to calculate quantity of interest at interpolation points
-        self.y_k = self.model.predict(self.X_k) + self.z_k        
-            
-        return(None)
-            
-            
-            
-            
+        return(self.z_k,self.sigma_k)
+    
+class OrdinaryKriging(Kriging):
+    """
+    Ordinary kriging class (child class of Kriging)
+    """
+    def __init__(self,hard_points,krig_points,response_variable,spatial_column='geometry',temporal_column='time_val'):
+        """
+        param: hard_points: geodataframe of "hard" observations (i.e., realizations of space-time random field)
+        param: krig_points: geodataframe of points to be interpolated via kriging
+        param: response_variable: column name corresponding to quantity of interest (z)
+        param: spatial_column: column name corresponding to pandas geoseries of point coordinates
+        param: temporal_column: column name corresponding to time values. Must be numeric (e.g., # days since 2000).  
+        """
+        super().__init__(hard_points,krig_points,response_variable,spatial_column,temporal_column)
         
+    def krig_values(self,n_max=1000,n_min=100):
+        """
+        Interpolate values via simple kringing. 
+        
+        param: n_max: maximum number of neighbors to include in kriging weight calculation. This is to reduce the 
+        computational burden of inverting the Chh covariance matrix. For each kriging point, the n_max neighbors with 
+        the highest covariance values that are within the spaital / temporal cutoffs will be selected. 
+        param: n_min: minimum number of neighbors to include in kriging weight calculations. Due to the relay effect, it can
+        be beneficial to add additional points even if their covariance with x0 is zero. 
+        """
 
+        # Get covariance matrices (note that these are scipy sparse CSR arrays)
+        cov_hh = apply_covariance_sparse(self.Cst,self.spatial_dmat_hh,self.temporal_dmat_hh,self.adjmat_hh)
+        cov_kh = apply_covariance_sparse(self.Cst,self.spatial_dmat_kh,self.temporal_dmat_kh,self.adjmat_kh)
+        
+        self.z_k = np.nan*np.ones(self.n_k)
+        self.sigma_k = np.nan*np.ones(self.n_k)
+        
+        # Get variance of residuals
+        sigma_kk = np.sqrt(self.Cst.cov(0,0))
+        
+        print('Interpolating residuals via simple kriging:')
+        
+        progress_step = np.ceil(0.1*self.n_k)
+        update_progress = np.arange(self.n_k) % progress_step == 0
+        update_progress[0] = False
+        
+        t1 = time.time()
+        
+        for k in range(self.n_k):
+            
+            if cov_kh[[k]].count_nonzero() > 0:
+                
+                # Determine which hard points to use in kriging weight calculation for point k
+                # Ideally, we want this number to be between n_min and n_max
+                # Prioritize those points that exhibit strongest correlation with k
+            
+                extra,adj_inds = self.adjmat_kh[[k]].nonzero()
+                nonzero_mask = (cov_kh[[k],adj_inds] > 0)
+                adj_nonzero_cov = adj_inds[nonzero_mask]
+                adj_zero_cov = adj_inds[~nonzero_mask]
+                adj_nonzero_cov = adj_nonzero_cov[np.argsort(cov_kh[[k],adj_nonzero_cov])[-n_max:]]
+                n_adj_nonzero_cov = len(adj_nonzero_cov)
+
+                if (n_adj_nonzero_cov < n_min):
+                    
+                    # The reason we add additional points even though they have zero correlation with k
+                    # is because of the relay effect. For a good explanation of this, see section 3.6.1 of 
+                    # Geostatistics: Modeling Spatial Uncertainty by Jean-Paul Chiles (2012, 2nd edition)
+                    
+                    n_adj_zero_cov = len(adj_zero_cov)
+                    n_extra = min(n_min-n_adj_nonzero_cov,n_adj_zero_cov)   
+                    relay = cov_hh[adj_nonzero_cov].toarray()[:,adj_zero_cov]
+                    
+                    # When adding extra points to reach n_min, select those that have greatest 
+                    # correlation with already-included points that are correlated with k
+                    
+                    extra_inds = adj_zero_cov[np.argsort(np.max(relay,axis=0))[-n_extra:]]
+                    h_inds = np.concatenate((adj_nonzero_cov,extra_inds))
+                    n_h_included = n_adj_nonzero_cov + n_extra
+                else:
+                    h_inds = adj_nonzero_cov
+                    n_h_included = n_adj_nonzero_cov
+                
+                # Create Ckh and Chh covariance matrices
+                Ckh = cov_kh[[k],h_inds].reshape(1,n_h_included)
+                Chh = cov_hh[h_inds].toarray()[:,h_inds]
+
+                # Get value of z at relevant hard points
+                z_h = self.z_h[h_inds]
+                z_h.shape = (n_h_included,1)
+
+                # Take pseudoinverse of Chh covariance matrix 
+                Chh_inv = np.linalg.pinv(Chh, hermitian=True)
+                
+                # Estimate mean
+                unit = np.ones((n_h_included,1))
+                term1 = (unit.T @ Chh_inv @ z_h)[0,0]
+                term2 = (unit.T @ Chh_inv @ unit)[0,0]
+                m_z = term1 / term2
+                
+                # Estimate lambda values
+                term1 = 1 - unit.T @ Chh_inv @ Ckh.T
+                term3 = (unit @ term1) / term2
+                lam_hk = Chh_inv @ (Ckh.T + term3)
+                
+                # Estimate lagrange multiplier
+                mu = (unit.T @ Chh_inv @ Ckh.T - 1)[0,0] / term2
+                
+                # Get kriging estimate of z_k
+                self.z_k[k] = m_z + (Ckh @ Chh_inv @ (z_h - m_z))[0,0]
+
+                # Get kriging standard deviation of z_k
+                var_k = sigma_kk**2 - (lam_hk.T @ Ckh.T)[0,0] - mu
+                self.sigma_k[k] = np.sqrt(var_k)
+                
+            else:
+                self.z_k[k] = 0
+                self.sigma_k[k] = sigma_kk
+                
+            if update_progress[k]:
+                
+                t2 = time.time()
+                elapsed_time = format_elapsed_time(t2-t1)
+                progress = np.round(k/self.n_k*100,-1).astype(int)
+                
+                print(f'    {k} / {self.n_k} ({progress}%) complete: {elapsed_time} elapsed',flush=True)
+                
+        t2 = time.time()
+        elapsed_time = format_elapsed_time(t2-t1)
+        print(f'    {self.n_k} / {self.n_k} (100%) complete: {elapsed_time} elapsed',flush=True)
+            
+        return(self.z_k,self.sigma_k)
