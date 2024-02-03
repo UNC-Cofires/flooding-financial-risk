@@ -31,7 +31,7 @@ for environment_var in relevant_environment_vars:
 pwd = os.getcwd()
 
 # Specify output directory for model runs
-outfolder = os.path.join(pwd,dt.datetime.today().strftime('%Y-%m-%d_model_runs'))
+outfolder = os.path.join(pwd,dt.datetime.today().strftime('%Y-%m-%d_damage_estimates'))
 if not os.path.exists(outfolder):
     os.makedirs(outfolder,exist_ok=True)
 
@@ -327,7 +327,7 @@ cost_features = fp.remove_unnecessary_features(cost_features,floodevent.training
 
 ### *** PERFORM CROSS VALIDATION *** ###
 floodevent.random_cross_validation(presence_response_variable,presence_features,cost_response_variable,cost_features,use_adjusted=True,k=10,n_cores=n_cores)
-floodevent.spatial_cross_validation(presence_response_variable,presence_features,cost_response_variable,cost_features,tiles,use_adjusted=True,n_cores=n_cores)
+#floodevent.spatial_cross_validation(presence_response_variable,presence_features,cost_response_variable,cost_features,tiles,use_adjusted=True,n_cores=n_cores)
 
 ### *** PREDICT FLOOD DAMAGE AMONG UNINSURED *** ###
 floodevent.predict_flood_damage(presence_response_variable,presence_features,cost_response_variable,cost_features,use_adjusted=True,n_cores=n_cores)

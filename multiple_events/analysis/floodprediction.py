@@ -350,10 +350,10 @@ def tune_hyperparams(data,presence_response_variable,presence_features,cost_resp
     y = data[presence_response_variable].to_numpy()
     x = data[presence_features].to_numpy()
 
-    param_grid = {'n_estimators':[150],'max_depth':[3,5,7],'max_features':['sqrt']}
-    model = RandomForestClassifier()
+    param_grid = {'n_estimators':[200],'max_features':[0.75],'max_depth':[5,7,9]}
+    model = RandomForestRegressor()
 
-    grid_search = GridSearchCV(model, param_grid=param_grid, cv=k, scoring='roc_auc',n_jobs=n_cores)
+    grid_search = GridSearchCV(model, param_grid=param_grid, cv=k, scoring='neg_mean_squared_error',n_jobs=n_cores)
     grid_search.fit(x,y)
     presence_hyperparams = grid_search.best_params_ 
 
@@ -362,10 +362,10 @@ def tune_hyperparams(data,presence_response_variable,presence_features,cost_resp
     y = data[m][cost_response_variable].to_numpy()
     x = data[m][cost_features].to_numpy()
 
-    param_grid = {'n_estimators':[150],'max_depth':[3,5,7],'max_features':[0.33,0.5,0.66]}
+    param_grid = {'n_estimators':[200],'max_features':[0.75],'max_depth':[5,7,9]}
     model = RandomForestRegressor()
 
-    grid_search = GridSearchCV(model, param_grid=param_grid, cv=k, scoring='r2',n_jobs=n_cores)
+    grid_search = GridSearchCV(model, param_grid=param_grid, cv=k, scoring='neg_mean_squared_error',n_jobs=n_cores)
     grid_search.fit(x,y)
     cost_hyperparams = grid_search.best_params_
 
