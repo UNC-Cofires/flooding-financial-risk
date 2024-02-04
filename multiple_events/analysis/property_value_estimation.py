@@ -24,7 +24,8 @@ group_idx = int(os.environ['SLURM_ARRAY_TASK_ID'])
 group = group_df.loc[group_idx].to_dict()
 
 # Specify output directory for model runs
-outfolder = os.path.join(pwd,dt.datetime.today().strftime(f'%Y-%m-%d_property_value_estimates/group_{group_idx}'))
+pv_folder = os.path.join(pwd,dt.datetime.today().strftime(f'%Y-%m-%d_property_value_estimates'))
+outfolder = os.path.join(pv_folder,f'group_{group_idx}')
 if not os.path.exists(outfolder):
     os.makedirs(outfolder,exist_ok=True)
 
@@ -209,8 +210,13 @@ property_timepoints = property_timepoints.sort_values(by=['building_id','date'])
 property_timepoints_outname = os.path.join(outfolder,f'group_{group_idx}_property_timepoints.csv')
 property_timepoints.to_csv(property_timepoints_outname,index=False)
 
-cv_outname = os.path.join(outfolder,'property_value_cross_validation.gdb')
+cv_outname = os.path.join(pv_folder,'property_value_cross_validation.gdb')
 cv_df.to_file(cv_outname,layer=f'group_{group_idx}',driver='OpenFileGDB')
+
+cv_object_outname = os.path.join(outfolder,f'group_{group_idx}_cross_validation.object')
+with open(cv_object_outname,'wb') as f:
+    pickle.dump(cv_df,f)
+    f.close()
 
 sk_outname = os.path.join(outfolder,f'group_{group_idx}_SimpleKriging.object')
 with open(sk_outname,'wb') as f:
