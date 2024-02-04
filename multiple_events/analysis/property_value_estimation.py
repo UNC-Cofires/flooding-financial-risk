@@ -1,5 +1,6 @@
 import os
 import pickle
+import gc
 import numpy as np
 import pandas as pd
 import geopandas as gpd
@@ -163,13 +164,20 @@ cv_df['abs_percent_error_log'] = cv_df['abs_error_log']/np.abs((cv_df['log_val_t
 cv_df['abs_error_nonlog'] = np.abs((cv_df['val_transfer'] - cv_df['val_transfer_kriged']))
 cv_df['abs_percent_error_nonlog'] = cv_df['abs_error_nonlog']/np.abs((cv_df['val_transfer']))
 
+# Save cross-validation results
+cv_outname = os.path.join(pv_folder,'property_value_cross_validation.gdb')
+cv_df.to_file(cv_outname,layer=f'group_{group_idx}',driver='OpenFileGDB')
+
+cv_object_outname = os.path.join(outfolder,f'group_{group_idx}_cross_validation.object')
+with open(cv_object_outname,'wb') as f:
+    pickle.dump(cv_df,f)
+    f.close()
+
 
 ### *** RANDOM FOREST REGRESSION KRIGING PREDICTION *** ###
 
 # Now train on all sales and predict for all single family homes in study area at each time point
-
 X_h = sales[features].to_numpy()
-X_k = property_timepoints[features].to_numpy()
 y_h = sales[response_variable].to_numpy()
 
 # Determine optimal hyperparameters for mean trend random forest model
@@ -185,38 +193,42 @@ model = RandomForestRegressor(**hyperparams).fit(X_h,y_h)
 z_h = y_h - model.predict(X_h)
 sales['residual'] = z_h
 
-# Estimate residuals at krig points via simple kriging (assume zero mean)
-Cs = stk.SphCovFun(a_bounds=(250,5000))
-Ct = stk.ExpCovFun(a=365)
-Cst = stk.ProductSumSTCovFun(Cs,Ct,k3=0,nugget_bounds=(0,2),k1_bounds=(0,2),k2_bounds=(0,2))
-SK = stk.SimpleKriging(sales,property_timepoints,'residual',spatial_column='geometry',temporal_column='time_val')    
-SK.build_distance_matrices(5000,np.inf)
-SK.estimate_variogram(Cst,spatial_lags,temporal_lags,options={'tol':0.0001})
-z_k,sigma_k = SK.krig_values(n_max=250,n_min=50)
+# To reduce memory consumption, perform kriging in chunks
+n_chunks = 25
+krig_list = []
 
-y_k = z_k + model.predict(X_k)
-sigma_k[np.isnan(sigma_k)] = np.std(SK.z_h)
+for krig_points in np.array_split(property_timepoints,n_chunks):
+    
+    X_k = krig_points[features].to_numpy()
 
-property_timepoints['log_val_transfer_kriged'] = y_k
-property_timepoints['sigma_log_val_transfer_kriged'] = sigma_k
-property_timepoints['val_transfer_kriged'] = np.exp(y_k + 0.5*sigma_k**2)
-property_timepoints['sigma_val_transfer_kriged'] = property_timepoints['val_transfer_kriged']**2*(np.exp(sigma_k**2)-1)
-property_timepoints['log_val_transfer_RF'] = model.predict(X_k)
+    # Estimate residuals at krig points via simple kriging (assume zero mean)
+    Cs = stk.SphCovFun(a_bounds=(250,5000))
+    Ct = stk.ExpCovFun(a=365)
+    Cst = stk.ProductSumSTCovFun(Cs,Ct,k3=0,nugget_bounds=(0,2),k1_bounds=(0,2),k2_bounds=(0,2))
+    SK = stk.SimpleKriging(sales,krig_points,'residual',spatial_column='geometry',temporal_column='time_val')    
+    SK.build_distance_matrices(5000,np.inf)
+    SK.estimate_variogram(Cst,spatial_lags,temporal_lags,options={'tol':0.0001})
+    z_k,sigma_k = SK.krig_values(n_max=250,n_min=50)
 
-property_timepoints = property_timepoints.drop(columns='geometry')
-property_timepoints = property_timepoints.sort_values(by=['building_id','date']).reset_index(drop=True)
+    y_k = z_k + model.predict(X_k)
+    sigma_k[np.isnan(sigma_k)] = np.std(SK.z_h)
+
+    krig_points['log_val_transfer_kriged'] = y_k
+    krig_points['sigma_log_val_transfer_kriged'] = sigma_k
+    krig_points['val_transfer_kriged'] = np.exp(y_k + 0.5*sigma_k**2)
+    krig_points['sigma_val_transfer_kriged'] = krig_points['val_transfer_kriged']**2*(np.exp(sigma_k**2)-1)
+    krig_points['log_val_transfer_RF'] = model.predict(X_k)
+    
+    krig_list.append(krig_points)
+    gc.collect()
+    
+kriged_df = pd.concat(krig_list)
+kriged_df = kriged_df.drop(columns='geometry')
+kriged_df = kriged_df.sort_values(by=['building_id','date']).reset_index(drop=True)
 
 ### *** SAVE RESULTS *** ###
-property_timepoints_outname = os.path.join(outfolder,f'group_{group_idx}_property_timepoints.csv')
-property_timepoints.to_csv(property_timepoints_outname,index=False)
-
-cv_outname = os.path.join(pv_folder,'property_value_cross_validation.gdb')
-cv_df.to_file(cv_outname,layer=f'group_{group_idx}',driver='OpenFileGDB')
-
-cv_object_outname = os.path.join(outfolder,f'group_{group_idx}_cross_validation.object')
-with open(cv_object_outname,'wb') as f:
-    pickle.dump(cv_df,f)
-    f.close()
+kriged_outname = os.path.join(outfolder,f'group_{group_idx}_property_values_kriged.csv')
+kriged_df.to_csv(kriged_outname,index=False)
 
 sk_outname = os.path.join(outfolder,f'group_{group_idx}_SimpleKriging.object')
 with open(sk_outname,'wb') as f:
