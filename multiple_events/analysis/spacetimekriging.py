@@ -617,67 +617,73 @@ class Kriging:
         self.spatial_cutoff = spatial_cutoff
         self.temporal_cutoff = temporal_cutoff
         
-        self.kd_tree_h = spatial.cKDTree(self.xy_h)
-        self.kd_tree_k = spatial.cKDTree(self.xy_k)
+        # Build k-d tree for fast spatial lookups
+        xy = np.concatenate((self.xy_k,self.xy_h))
+        kd_tree = spatial.cKDTree(xy)
         
         t2 = time.time()
         elapsed_time = format_elapsed_time(t2-t1)
-        print(f'    Finished building k-d trees: {elapsed_time} elapsed',flush=True)
+        print(f'    Finished building k-d tree: {elapsed_time} elapsed',flush=True)
         
         # Find spatial pairs that are within cutoff distance
-        self.pairs_hh = self.kd_tree_h.query_pairs(r=self.spatial_cutoff,output_type='ndarray')
+        pairs = kd_tree.query_pairs(r=self.spatial_cutoff,output_type='ndarray')
 
+        hh_mask = (pairs[:,0] >= self.n_k)&(pairs[:,1] >= self.n_k)
+        kh_mask = (pairs[:,0] < self.n_k)&(pairs[:,1] >= self.n_k)
+
+        self.pairs_hh = pairs[hh_mask]
+        self.pairs_kh = pairs[kh_mask]
+        self.pairs_hh = self.pairs_hh - self.n_k
+        self.pairs_kh[:,1] = self.pairs_kh[:,1] - self.n_k
+        
+        t2 = time.time()
+        elapsed_time = format_elapsed_time(t2-t1)
+        print(f'    Finished querying pairs: {elapsed_time} elapsed',flush=True)
+    
         # Compute temporal distance for potential pairs
         self.pairs_hh_temporal_distance = np.abs(self.t_h[self.pairs_hh[:,0]] - self.t_h[self.pairs_hh[:,1]])
+        self.pairs_kh_temporal_distance = np.abs(self.t_k[self.pairs_kh[:,0]] - self.t_h[self.pairs_kh[:,1]])
         
         # Drop pairs that do not fall within temporal cutoff
-        m = (self.pairs_hh_temporal_distance < self.temporal_cutoff)
-        self.pairs_hh = self.pairs_hh[m]
-        self.pairs_hh_temporal_distance = self.pairs_hh_temporal_distance[m]
+        hh_mask = (self.pairs_hh_temporal_distance < self.temporal_cutoff)
+        kh_mask = (self.pairs_kh_temporal_distance < self.temporal_cutoff)
+        self.pairs_hh = self.pairs_hh[hh_mask]
+        self.pairs_hh_temporal_distance = self.pairs_hh_temporal_distance[hh_mask]
+        self.pairs_kh = self.pairs_kh[kh_mask]
+        self.pairs_kh_temporal_distance = self.pairs_kh_temporal_distance[kh_mask]
         
-        left = self.pairs_hh[:,0]
-        right = self.pairs_hh[:,1]
+        left_hh = self.pairs_hh[:,0]
+        right_hh = self.pairs_hh[:,1]
+        left_kh = self.pairs_kh[:,0]
+        right_kh = self.pairs_kh[:,1]
         
-        self.pairs_hh_spatial_distance = np.sum((self.xy_h[left] - self.xy_h[right])**2,axis=1)**0.5
+        # Compute spatial distance between remaining pairs
+        self.pairs_hh_spatial_distance = np.sum((self.xy_h[left_hh] - self.xy_h[right_hh])**2,axis=1)**0.5
+        self.pairs_kh_spatial_distance = np.sum((self.xy_k[left_kh] - self.xy_h[right_kh])**2,axis=1)**0.5
         
         # Create sparse adjacency and distance matrices
-        self.adjmat_hh = sparse.csr_array((np.ones(len(left),dtype=np.int8),(left,right)),shape=(self.n_h,self.n_h))
+        
+        # H-H matrices
+        self.adjmat_hh = sparse.csr_array((np.ones(len(left_hh),dtype=np.int64),(left_hh,right_hh)),shape=(self.n_h,self.n_h))
         self.adjmat_hh += self.adjmat_hh.T
         self.adjmat_hh += sparse.eye(self.n_h)
         
-        self.spatial_dmat_hh = sparse.csr_array((self.pairs_hh_spatial_distance,(left,right)),shape=(self.n_h,self.n_h))
+        self.spatial_dmat_hh = sparse.csr_array((self.pairs_hh_spatial_distance,(left_hh,right_hh)),shape=(self.n_h,self.n_h))
         self.spatial_dmat_hh += self.spatial_dmat_hh.T
         
-        self.temporal_dmat_hh = sparse.csr_array((self.pairs_hh_temporal_distance,(left,right)),shape=(self.n_h,self.n_h))
+        self.temporal_dmat_hh = sparse.csr_array((self.pairs_hh_temporal_distance,(left_hh,right_hh)),shape=(self.n_h,self.n_h))
         self.temporal_dmat_hh += self.temporal_dmat_hh.T
         
-        t2 = time.time()
-        elapsed_time = format_elapsed_time(t2-t1)
-        print(f'    Finished building hard point matrices: {elapsed_time} elapsed',flush=True)
+        # K-H matrices
+        self.adjmat_kh = sparse.csr_array((np.ones(len(left_kh),dtype=np.int64),(left_kh,right_kh)),shape=(self.n_k,self.n_h))
         
-        # Get relevant k-h pairs
-        pairs_kh = self.kd_tree_k.query_ball_tree(self.kd_tree_h,self.spatial_cutoff)
+        self.spatial_dmat_kh = sparse.csr_array((self.pairs_kh_spatial_distance,(left_kh,right_kh)),shape=(self.n_k,self.n_h))
         
-        self.adjmat_kh = sparse.dok_array((self.n_k, self.n_h), dtype=np.int8)
-        self.spatial_dmat_kh = sparse.dok_array((self.n_k, self.n_h), dtype=float)
-        self.temporal_dmat_kh = sparse.dok_array((self.n_k, self.n_h), dtype=float)
-        
-        for k,h_matches in enumerate(pairs_kh):
-            for h in h_matches:
-                spatial_distance = np.sum((self.xy_k[k] - self.xy_h[h])**2)**0.5
-                temporal_distance = np.abs(self.t_k[k] - self.t_h[h])
-                if temporal_distance < self.temporal_cutoff:
-                    self.adjmat_kh[k,h] = 1
-                    self.spatial_dmat_kh[k,h] = spatial_distance
-                    self.temporal_dmat_kh[k,h] = temporal_distance
-                    
-        self.adjmat_kh = self.adjmat_kh.tocsr()
-        self.spatial_dmat_kh = self.spatial_dmat_kh.tocsr()
-        self.temporal_dmat_kh = self.temporal_dmat_kh.tocsr()
+        self.temporal_dmat_kh = sparse.csr_array((self.pairs_kh_temporal_distance,(left_kh,right_kh)),shape=(self.n_k,self.n_h))
         
         t2 = time.time()
         elapsed_time = format_elapsed_time(t2-t1)
-        print(f'    Finished building krig point matrices: {elapsed_time} elapsed\n',flush=True)
+        print(f'    Finished building sparse distance matrices: {elapsed_time} elapsed\n',flush=True)
         
         return(None)
     
@@ -789,7 +795,7 @@ class SimpleKriging(Kriging):
         # Get variance of residuals
         sigma_kk = np.sqrt(self.Cst.cov(0,0))
         
-        print('Interpolating residuals via simple kriging:')
+        print('Interpolating values via simple kriging:')
         
         progress_step = np.ceil(0.1*self.n_k)
         update_progress = np.arange(self.n_k) % progress_step == 0
@@ -886,7 +892,7 @@ class OrdinaryKriging(Kriging):
         
     def krig_values(self,n_max=1000,n_min=100):
         """
-        Interpolate values via simple kringing. 
+        Interpolate values via ordinary kringing. 
         
         param: n_max: maximum number of neighbors to include in kriging weight calculation. This is to reduce the 
         computational burden of inverting the Chh covariance matrix. For each kriging point, the n_max neighbors with 
@@ -905,7 +911,7 @@ class OrdinaryKriging(Kriging):
         # Get variance of residuals
         sigma_kk = np.sqrt(self.Cst.cov(0,0))
         
-        print('Interpolating residuals via simple kriging:')
+        print('Interpolating values via ordinary kriging:')
         
         progress_step = np.ceil(0.1*self.n_k)
         update_progress = np.arange(self.n_k) % progress_step == 0
