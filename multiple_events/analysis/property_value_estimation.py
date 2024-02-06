@@ -25,7 +25,7 @@ group_idx = int(os.environ['SLURM_ARRAY_TASK_ID'])
 group = group_df.loc[group_idx].to_dict()
 
 # Specify output directory for model runs
-pv_folder = os.path.join(pwd,dt.datetime.today().strftime(f'%Y-%m-%d_property_value_estimates'))
+pv_folder = os.path.join(pwd,'property_value_estimates')
 outfolder = os.path.join(pv_folder,f'group_{group_idx}')
 if not os.path.exists(outfolder):
     os.makedirs(outfolder,exist_ok=True)
@@ -197,7 +197,9 @@ sales['residual'] = z_h
 n_chunks = 25
 krig_list = []
 
-for krig_points in np.array_split(property_timepoints,n_chunks):
+for i,krig_points in enumerate(np.array_split(property_timepoints,n_chunks)):
+    
+    print(f'\n*** Chunk {i+1} / {n_chunks} ***\n',flush=True)
     
     X_k = krig_points[features].to_numpy()
 
