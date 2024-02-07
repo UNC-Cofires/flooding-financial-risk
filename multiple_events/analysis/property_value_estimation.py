@@ -62,7 +62,7 @@ homes = homes[homes.intersects(study_area)]
 ### *** SPECIFY TIMEPOINTS OF PROPERTY VALUE ESTIMATION *** ###
 
 # Get dates corresponding to midpoint of each quarter between 1995 and 2020
-dates = pd.date_range('1995-01-01','2019-12-31',freq='D')
+dates = pd.date_range('1990-01-01','2019-12-31',freq='D')
 quarters = dates.to_period('Q')
 q_start = dates.is_quarter_start
 q_end = dates.is_quarter_end
@@ -194,7 +194,7 @@ z_h = y_h - model.predict(X_h)
 sales['residual'] = z_h
 
 # To reduce memory consumption, perform kriging in chunks
-n_chunks = 25
+n_chunks = 30
 krig_list = []
 
 for i,krig_points in enumerate(np.array_split(property_timepoints,n_chunks)):
@@ -232,7 +232,12 @@ kriged_df = kriged_df.sort_values(by=['building_id','date']).reset_index(drop=Tr
 kriged_outname = os.path.join(outfolder,f'group_{group_idx}_property_values_kriged.csv')
 kriged_df.to_csv(kriged_outname,index=False)
 
-sk_outname = os.path.join(outfolder,f'group_{group_idx}_SimpleKriging.object')
-with open(sk_outname,'wb') as f:
-    pickle.dump(SK,f)
+covfun_outname = os.path.join(outfolder,f'group_{group_idx}_covariance_function.object')
+with open(covfun_outname,'wb') as f:
+    pickle.dump(SK.Cst,f)
+    f.close()
+    
+variogram_outname = os.path.join(outfolder,f'group_{group_idx}_empirical_variogram.object')
+with open(variogram_outname,'wb') as f:
+    pickle.dump(SK.empirical_variogram,f)
     f.close()
