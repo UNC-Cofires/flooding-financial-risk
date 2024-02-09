@@ -350,7 +350,7 @@ def tune_hyperparams(data,presence_response_variable,presence_features,cost_resp
     y = data[presence_response_variable].to_numpy()
     x = data[presence_features].to_numpy()
 
-    param_grid = {'n_estimators':[200],'max_features':[0.75],'max_depth':[5,7,9]}
+    param_grid = {'n_estimators':[200],'max_features':[1.0],'max_depth':[5,7,9]}
     model = RandomForestRegressor()
 
     grid_search = GridSearchCV(model, param_grid=param_grid, cv=k, scoring='neg_mean_squared_error',n_jobs=n_cores)
@@ -362,7 +362,7 @@ def tune_hyperparams(data,presence_response_variable,presence_features,cost_resp
     y = data[m][cost_response_variable].to_numpy()
     x = data[m][cost_features].to_numpy()
 
-    param_grid = {'n_estimators':[200],'max_features':[0.75],'max_depth':[5,7,9]}
+    param_grid = {'n_estimators':[200],'max_features':[1.0],'max_depth':[5,7,9]}
     model = RandomForestRegressor()
 
     grid_search = GridSearchCV(model, param_grid=param_grid, cv=k, scoring='neg_mean_squared_error',n_jobs=n_cores)
@@ -877,13 +877,14 @@ class FloodEvent:
         
         return(None)
 
-    def aggregate_flood_damage(self,stratification_columns):
+    def aggregate_flood_damage(self,stratification_columns,use_adjusted=True):
         """
         Combine estimates of insured (i.e., training) and uninsured (i.e., target) losses to create
         overall estimate of flood damage in study region.
 
         param: stratification_columns: list of columns used to aggregate damage estimates.
         """
+        
         insured_df = self.training_dataset[['building_id','study_area','geometry','flood_damage','total_cost'] + stratification_columns].rename(columns={'flood_damage':'flood_damage_class'})
         insured_df = insured_df[insured_df['study_area']==1]
         insured_df['flood_damage_prob'] = insured_df['flood_damage_class']
