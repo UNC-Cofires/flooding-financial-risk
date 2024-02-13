@@ -7,6 +7,7 @@ library(tmap)
 library(raster)
 
 
+
 # Specify working directory and file paths
 base_dir <- "/proj/characklab/flooddata/NC"
 output_dir <-paste(base_dir,"multiple_events/data_processing/rasters",sep="/")
