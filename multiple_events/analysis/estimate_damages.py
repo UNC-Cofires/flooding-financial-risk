@@ -318,7 +318,7 @@ cost_features = fp.remove_unnecessary_features(cost_features,floodevent.training
 
 ### *** PERFORM CROSS VALIDATION *** ###
 floodevent.random_cross_validation(presence_response_variable,presence_features,cost_response_variable,cost_features,use_adjusted=True,k=10,n_cores=n_cores)
-floodevent.spatial_cross_validation(presence_response_variable,presence_features,cost_response_variable,cost_features,tiles,use_adjusted=True,n_cores=n_cores)
+floodevent.spatial_cross_validation(presence_response_variable,presence_features,cost_response_variable,cost_features,tiles,use_adjusted=True,max_k=500,n_cores=n_cores)
 
 ### *** PREDICT FLOOD DAMAGE AMONG UNINSURED *** ###
 floodevent.predict_flood_damage(presence_response_variable,presence_features,cost_response_variable,cost_features,use_adjusted=True,n_cores=n_cores)

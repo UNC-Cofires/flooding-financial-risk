@@ -386,30 +386,118 @@ def build_neighbor_dict(gdf):
         
     return(neighbor_dict)
 
-def spatial_block_cv_split(tiles):
+def draw_k_value_1_degrees(tile_index,tile_ks,neighbor_dict,k_vals):
+    """
+    Draw a value of k for a given tile, ensuring that identical values of k have ≥1 degree of separation
+    Must have at least 4 unique values of k to select from.  
+    """
+    neighbor_ks = tile_ks[neighbor_dict[tile_index]]
+    k_options = k_vals[~np.isin(k_vals,neighbor_ks)]
+    return(np.random.choice(k_options))
+
+def draw_k_value_2_degrees(tile_index,tile_ks,neighbor_dict,k_vals):
+    """
+    Draw a value of k for a given tile, ensuring that identical values of k have ≥2 degrees of separation
+    Must have at least 10 unique values of k to select from.  
+    """
+    neighbor_ks = tile_ks[neighbor_dict[tile_index]]
+    
+    for neighbor_index in neighbor_dict[tile_index]:
+        neighbor_ks = np.concatenate((neighbor_ks,tile_ks[neighbor_dict[neighbor_index]]))
+        
+    neighbor_ks = np.unique(neighbor_ks)
+    
+    k_options = k_vals[~np.isin(k_vals,neighbor_ks)]
+    return(np.random.choice(k_options))
+
+def draw_k_value_3_degrees(tile_index,tile_ks,neighbor_dict,k_vals):
+    """
+    Draw a value of k for a given tile, ensuring that identical values of k have ≥3 degrees of separation
+    Must have at least 19 unique values of k to select from.  
+    """
+    neighbor_ks = tile_ks[neighbor_dict[tile_index]]
+    
+    for i in neighbor_dict[tile_index]:
+        neighbor_ks = np.concatenate((neighbor_ks,tile_ks[neighbor_dict[i]]))
+        for j in neighbor_dict[i]:
+            neighbor_ks = np.concatenate((neighbor_ks,tile_ks[neighbor_dict[j]]))
+        
+    neighbor_ks = np.unique(neighbor_ks)
+    
+    k_options = k_vals[~np.isin(k_vals,neighbor_ks)]
+    return(np.random.choice(k_options))
+
+# Rather than all this, maybe just do leave location out since it seems like each evaluation is really fast
+def spatial_kfold(tiles,k=100,degree=3):
+    """
+    param: tiles: pandas geodataframe of spatial blocks (usually hexagonal tiles)
+    param: k: number of cross-validation folds
+    param: degree: number of degrees of separation between blocks in same fold (can be 1, 2, or 3)
+    """
+    
+    if degree not in [1,2,3]:
+        raise(ValueError('Parameter `degree` must have value of 1, 2, or 3'))
+        
+    if degree==3:
+        draw_k_value = lambda w,x,y,z: draw_k_value_3_degrees(w,x,y,z)
+        if k < 19:
+            raise(ValueError('Parameter k must be ≥19 when degree=3'))
+    if degree==2:
+        draw_k_value = lambda w,x,y,z: draw_k_value_2_degrees(w,x,y,z)
+        if k < 10:
+            raise(ValueError('Parameter `k` must be ≥10 when degree=2'))
+    else:
+        draw_k_value = lambda w,x,y,z: draw_k_value_1_degrees(w,x,y,z)
+        if k < 4:
+            raise(ValueError('Parameter `k` must be ≥4 when degree=1'))
+            
+    num_tiles = len(tiles)
+    tiles.index = np.arange(num_tiles)
+    k_vals = np.arange(k)
+    
+    tile_ks = -1*np.ones(num_tiles,dtype=int)
+
+    neighbor_dict = build_neighbor_dict(tiles)
+
+    for i in range(num_tiles):
+        tile_ks[i] = draw_k_value(i,tile_ks,neighbor_dict,k_vals)
+
+    tiles['fold'] = tile_ks
+        
+    return(tiles,neighbor_dict)
+
+def spatial_block_cv_split(tiles,k=100,degree=3):
     """
     Create spatially-blocked cross validation splits. 
     Includes a built-in buffer layer of tiles between testing and training set. 
     
     param: tiles: pandas geodataframe of spatial blocks
+    param: k: number of cross-validation folds
+    param: degree: number of degrees of separation between blocks in same fold (can be 1, 2, or 3)
     returns: list of tuples denoting tile indices in train/test set for each split. 
     """
-    neighbor_dict = build_neighbor_dict(tiles)
+    
+    tiles,neighbor_dict = spatial_kfold(tiles,k=k,degree=degree)
     
     splits = []
     
-    for test_index in tiles.index.values:
+    for k in tiles['fold'].unique():
         
-        # Exclude tiles bordering test set from training set
-        excluded_tiles = neighbor_dict[test_index]
-        m1 = np.isin(tiles.index.values,excluded_tiles)
+        test_indices = tiles[tiles['fold']==k].index.values
+        excluded_tiles = []
         
-        # Also exclude tile corresponding to test set
-        m2 = (tiles.index.values == test_index)
-                
+        for i in test_indices:
+            excluded_tiles += neighbor_dict[i]
+            
+        # Exclude tiles in test set from training
+        m1 = np.isin(tiles.index.values,test_indices)
+        
+        # Also exclude those bordering test set
+        m2 = np.isin(tiles.index.values,excluded_tiles)
+            
+
         train_indices = tiles.index.values[~(m1|m2)]
-        
-        splits.append((train_indices,test_index))
+        splits.append((train_indices,test_indices))
         
     return(splits)
     
@@ -732,7 +820,7 @@ class FloodEvent:
 
         return(None)
     
-    def spatial_cross_validation(self,presence_response_variable,presence_features,cost_response_variable,cost_features,tiles,use_adjusted=True,n_cores=1):
+    def spatial_cross_validation(self,presence_response_variable,presence_features,cost_response_variable,cost_features,tiles,use_adjusted=True,max_k=500,n_cores=1):
         """
         param: presence_response_variable: name of binary response variable indicating presence/absence of flooding
         param: presence_features: list of features used to predict the presence/absence of flood damage
@@ -740,12 +828,12 @@ class FloodEvent:
         param: cost_features: list of features used to predict the cost of damage to flooded structures
         param: tiles: spatial blocks used to define cross-validation splits
         param: use_adjusted: if true, train models using adjusted training data which includes pseudo-absences
+        param: max_k: maximum number of cross-validation folds
         param: n_cores: number of cores to use if running tasks in parallel
         """
         
         tiles = tiles[tiles['geometry'].intersects(self.study_area)][['geometry']]
-        k = len(tiles)
-        tiles.index = np.arange(k)
+        tiles.index = np.arange(len(tiles))
         
         if use_adjusted:
             data = self.adjusted_training_dataset
@@ -754,7 +842,8 @@ class FloodEvent:
             
         data = gpd.sjoin(data,tiles).rename(columns={'index_right':'tile_index'})
         
-        splits = spatial_block_cv_split(tiles)
+        splits = spatial_block_cv_split(tiles,k=max_k)
+        k = len(splits)
                 
         print(f'\n*** {k}-fold cross validation (spatial) ***',flush=True)
             
@@ -762,12 +851,12 @@ class FloodEvent:
         
         t0 = time.time()
             
-        for i,(train_tile_indices,test_tile_index) in enumerate(splits):
+        for i,(train_tile_indices,test_tile_indices) in enumerate(splits):
             
             t1 = time.time()
             
             train_df = data[data['tile_index'].isin(train_tile_indices)].copy()
-            test_df = data[data['tile_index']==test_tile_index].copy()
+            test_df = data[data['tile_index'].isin(test_tile_indices)].copy()
             
             if len(test_df) > 0:
             
@@ -793,6 +882,7 @@ class FloodEvent:
         results_dict,roc_curve,pr_curve = performance_metrics(y_pred,y_class,y_true,c_pred,c_true)
         
         self.spatial_cv_tiles = tiles
+        self.spatial_cv_splits = splits
         self.spatial_cv_predictions = predictions_df
         self.spatial_cv_performance_metrics = results_dict
         self.spatial_cv_roc_curve = roc_curve
