@@ -4,7 +4,7 @@
 #SBATCH -N 1
 #SBATCH -n 4
 #SBATCH --mem=140g
-#SBATCH -t 3-00:00:00
+#SBATCH -t 5-00:00:00
 #SBATCH --mail-type=all
 #SBATCH --mail-user=kieranf@email.unc.edu
 #SBATCH --array=0-6

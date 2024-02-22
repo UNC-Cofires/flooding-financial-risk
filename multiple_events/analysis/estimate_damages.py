@@ -93,7 +93,7 @@ watersheds = gpd.read_file(watersheds_path).to_crs(crs)
 watersheds = watersheds[['huc6','geometry']]
 
 # Read in geodataframe of tiles to be used in spatial cross-validation
-tiles_path = '/proj/characklab/flooddata/NC/multiple_events/geospatial_data/NC_tiles/nc_5km_hexgrid'
+tiles_path = '/proj/characklab/flooddata/NC/multiple_events/geospatial_data/NC_tiles/nc_squaregrid_5000m_sidelength'
 tiles = gpd.read_file(tiles_path).to_crs(crs)
 
 ### *** PRE-PROCESS MAIN DATA SOURCES ***
