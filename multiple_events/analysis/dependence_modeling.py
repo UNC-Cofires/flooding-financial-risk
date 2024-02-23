@@ -4,6 +4,8 @@ import scipy.integrate as si
 import scipy.optimize as so
 import scipy.interpolate as interp
 import scipy.linalg as sla
+import pandas as pd
+import itertools
 import sys
 
 class BivariateClayton:
@@ -702,30 +704,38 @@ class StudentsTCopula(BivariateStudentsT):
         LL = np.sum(weights*np.log(self.pdf(u,v)))
         return(LL)
     
-def empirical_cdf(x,weights=None):
+class empirical_distribution:
     """
-    Return an empirical cumulative distribution function (CDF)
-    and inverse CDF based on samples of data. 
-    
-    param: x: sampled values of x
-    param: weights: weights associated with sampled values of x
+    Class for modeling the empirical distribution of a random variable based on samples of data. 
     """
     
-    if weights is None:
-        weights = np.ones(len(x))
+    def __init__(self,x,weights=None):
+        """
+        param: x: sampled values of x
+        param: weights: weights associated with sampled values of x
+        """
     
-    sort_inds = np.argsort(x)
-    x = x[sort_inds]
-    weights = weights[sort_inds]
-    
-    # For weighted CDF, Pr(X <= x) = sum(weights[X <= x])
-    F = np.cumsum(weights)/np.sum(weights)
-    
-    cdf = interp.interp1d(x,F,kind='linear',fill_value=(0,1))
-    inv_cdf = interp.interp1d(F,x,kind='linear',bounds_error=True)
-    
-    return(cdf,inv_cdf)
-    
+        if weights is None:
+            weights = np.ones(len(x))
+            
+        # Remove nans
+        mask = ~np.isnan(x)
+        x = x[mask]
+        weights = weights[mask]
+        
+        sort_inds = np.argsort(x)
+        x = x[sort_inds]
+        weights = weights[sort_inds]
+
+        # For weighted CDF, Pr(X <= x) = sum(weights[X <= x])
+        F = np.cumsum(weights)/np.sum(weights)
+
+        self.cdf = interp.interp1d(x,F,kind='linear',bounds_error=False,fill_value=(0,1))
+        self.ppf = interp.interp1d(F,x,kind='linear',bounds_error=False,fill_value=(np.min(x),np.max(x)))
+        self.rvs = lambda n=1: self.ppf(stats.uniform().rvs(n))
+        self.kde = stats.gaussian_kde(x,weights=weights)
+        self.pdf = np.vectorize(lambda z: self.kde.pdf(z))
+        
 def fit_archimedean_copula(u,v,family_options=['Clayton','Frank','Gumbel','Joe'],rotation_options=[0,90,180,270],weights=None):
     """
     Determine the best-fit Archimedean copula based on maximum likelihood estimation.
@@ -819,7 +829,7 @@ class MultivariateGaussianCopula:
     def pdf(self,uu):
         """
         param: uu: array of m realizations of d uniform random variables (m x d array)
-        returns: probability density
+        returns: probability density associated with each realization
         """
         d = stats.norm()
         zz = d.ppf(uu)
@@ -831,7 +841,7 @@ class MultivariateGaussianCopula:
     def cdf(self,uu):
         """
         param: uu: array of m realizations of d uniform random variables (m x d array)
-        returns: probability that U1 ≤ u1, U2 ≤ u2, ..., Ud ≤ ud for each of the m observations
+        returns: probability that U1 ≤ u1, U2 ≤ u2, ..., Ud ≤ ud for each of the m realizations
         """
         d = stats.norm()
         zz = d.ppf(uu)
@@ -842,7 +852,7 @@ class MultivariateGaussianCopula:
         Randomly draw values from parameterized multivariate gaussian copula. 
         
         param: n: number of realizations to simulate
-        param: uu: array of n simulated realizations of d uniform random variables (n x d array)
+        returns: uu: array of n simulated realizations of d uniform random variables (n x d array)
         """
         d = stats.norm()
         zz = self.mv_norm.rvs(size=n)
@@ -856,7 +866,7 @@ class MultivariateGaussianCopula:
         
         See: https://en.wikipedia.org/wiki/Multivariate_normal_distribution#Conditional_distributions
         
-        param: u: one realization of d uniform random variables (m x d array) with unknown values represented by np.nan 
+        param: u: one realization of d uniform random variables (1 x d array) with unknown values represented by np.nan 
         returns: cond_mv_norm: multivariate guassian distribution of unknown vars conditioned on known vars
         returns: known_cols: column indicies associated with known vars
         returns: unknown_cols: column indices associated with unknown vars
@@ -882,11 +892,11 @@ class MultivariateGaussianCopula:
         cond_mv_norm = stats.multivariate_normal(mean=mu,cov=sigma)
         
         return(cond_mv_norm,known_cols,unknown_cols)
-        
+    
     def conditional_simulation(self,uu):
         """
         param: uu: array of m realizations of d uniform random variables (m x d array) with unknown values represented by np.nan
-        returns: uu_sim: input array with missing values drawn 
+        returns: uu_sim: input array with values of unknown variables simulated conditional on values of known variables 
         """
         d = stats.norm()
         uu_sim = uu.copy()
@@ -895,16 +905,171 @@ class MultivariateGaussianCopula:
             
             # Get gaussian distribution conditional on realization of u
             u = uu_sim[i]
-            cond_mv_norm,known_cols,unknown_cols = self.conditional_distribution(u)
             
-            # Simulate from conditoinal gaussian distribution
-            z_cond_sim = cond_mv_norm.rvs()
+            if np.isnan(u).any():
+                
+                cond_mv_norm,known_cols,unknown_cols = self.conditional_distribution(u)
+
+                # Simulate from conditoinal gaussian distribution
+                z_cond_sim = cond_mv_norm.rvs()
+
+                # Transform back to a uniform variable
+                u_cond_sim = d.cdf(z_cond_sim)
+                uu_sim[i,unknown_cols] = u_cond_sim
+                
+            else:
+                uu_sim[i] = u
             
-            # Transform back to a uniform variable
-            u_cond_sim = d.cdf(z_cond_sim)
-            uu_sim[i,unknown_cols] = u_cond_sim
+        return(uu_sim)        
+    
+class DependenceModel:
+    """
+    Class used to model the joint distribution of random variables.
+    The dependence between variables is modeled using a multivariate gaussian copula. 
+    """
+    
+    def __init__(self,marginals):
+        """
+        param: marginals: dict of marginal distributions. 
+                          Each key is the name of the variable. 
+                          Each value is an instance of scipy.stats.rv_continuous (or a similar class)
+        """
+        self.n_vars = len(marginals)
+        self.var_names = list(marginals.keys())
+        self.name_to_index = {name:i for i,name in enumerate(self.var_names)}
+        self.var_dists = list(marginals.values())
+        self.marginals = marginals
+        
+        # At initialization, assume everything is independent
+        self.R = np.identity(self.n_vars)
+        self.copula = MultivariateGaussianCopula(self.R)
+        
+    def add_dependence(self,var1,var2,theta):
+        """
+        Add dependence/correlation between two variables. This will be modeled using a gaussian copula. 
+        
+        param: var1: name of variable #1
+        param: var2: name of variable #2
+        param: theta: value of dependence parameter between variables 1 & 2
+        """
+        if var1 not in self.var_names:
+            raise ValueError(f'Unrecognized variable name \'{var1}\'')
+        if var2 not in self.var_names:
+            raise ValueError(f'Unrecognized variable name \'{var2}\'')
+        if var1 == var2:
+            raise ValueError(f'A variable cannot have dependence with itself.')
+        if np.abs(theta) > 1:
+            raise ValueError(f'Theta must be between -1 and 1.')
             
-        return(uu_sim)
+        i = self.name_to_index[var1]
+        j = self.name_to_index[var2]
+            
+        self.R[i,j] = theta
+        self.R[j,i] = theta
+        self.copula = MultivariateGaussianCopula(self.R)
+        
+    def fit_dependence(self,df):
+        """
+        Fit a multiavariate gaussian copula to observed data. 
+        param: df: dataframe of observed realizations of variables. Column names should be the same as variable names. 
+        """
+        included_vars = [var for var in self.var_names if var in df.columns]
+        df = df[included_vars]
+        
+        for var1,var2 in itertools.combinations(included_vars,2):
+            
+            print(f'*** Fitting dependence between {var1} and {var2} ***',flush=True)
+            
+            mask = (~df[var1].isna())&(~df[var2].isna())
+            
+            x1 = df[mask][var1].to_numpy()
+            x2 = df[mask][var2].to_numpy()
+            u1 = self.marginals[var1].cdf(x1)
+            u2 = self.marginals[var2].cdf(x2)
+            
+            c,extra = fit_gaussian_copula(u1,u2)
+            theta = extra[-1]
+            
+            self.add_dependence(var1,var2,theta)
+    
+    def pdf(self,xx):
+        """
+        Return the probability density of a multivariate distribution
+        
+        Calculated based on the density of the copula and the marginals based on Sklar's theorem. 
+        See: https://en.wikipedia.org/wiki/Copula_(probability_theory)#Sklar's_theorem
+        
+        param: xx: m realizations of d random variables (m x d array)
+        returns: probability density associated with each realization
+        """
+        ff = np.zeros(xx.shape)
+        uu = np.zeros(xx.shape)
+        for i in range(self.n_vars):
+            ff[:,i] = self.var_dists[i].pdf(xx[:,i])
+            uu[:,i] = self.var_dists[i].cdf(xx[:,i])
+                
+        return self.copula.pdf(uu)*np.prod(ff,axis=1)
+    
+    def cdf(self,xx):
+        """
+        param: xx: m realizations of d random variables (m x d array)
+        returns: probability that X1 ≤ x1, X2 ≤ x2, ..., Xd ≤ xd for each of the m realizations
+        """
+        uu = np.zeros(xx.shape)
+        for i in range(self.n_vars):
+            uu[:,i] = self.var_dists[i].cdf(xx[:,i])
+            
+        return self.copula.cdf(uu)
+    
+    def simulate_values(self,n,return_dataframe=False):
+        """
+        Randomly draw values from multivariate distribution. 
+        
+        param: n: number of realizations to simulate
+        param: return_dataframe: if true, return a pandas dataframe of simulated variables instead of numpy array
+        returns: xx: array of n simulated realizations of d random variables (n x d array)
+        """
+        uu = self.copula.simulate_values(n)
+        xx = np.zeros(uu.shape)
+        
+        for i in range(self.n_vars):
+            xx[:,i] = self.var_dists[i].ppf(uu[:,i])
+            
+        if return_dataframe:
+            return pd.DataFrame(xx,columns=self.var_names)
+        else:
+            return xx
+        
+    def conditional_simulation(self,xx,return_dataframe=False):
+        """
+        param: xx: array of m realizations of d random variables (m x d array) with unknown values represented by np.nan
+        param: return_dataframe: if true, return a pandas dataframe of simulated variables instead of numpy array
+        returns: xx_sim: input array with values of unknown variables simulated conditional on values of known variables 
+        """
+        uu = np.zeros(xx.shape)
+        for i in range(self.n_vars):
+            uu[:,i] = self.var_dists[i].cdf(xx[:,i])
+            
+        uu_sim = self.copula.conditional_simulation(uu)
+        
+        xx_sim = np.zeros(uu_sim.shape)
+        for i in range(self.n_vars):
+            xx_sim[:,i] = self.var_dists[i].ppf(uu_sim[:,i])
+        
+        if return_dataframe:
+            return pd.DataFrame(xx_sim,columns=self.var_names)
+        else:
+            return xx_sim        
+        
+        
+        
+        
+        
+        
+            
+        
+        
+        
             
             
             
