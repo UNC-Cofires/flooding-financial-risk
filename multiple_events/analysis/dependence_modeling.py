@@ -3,6 +3,7 @@ import scipy.stats as stats
 import scipy.integrate as si
 import scipy.optimize as so
 import scipy.interpolate as interp
+import scipy.linalg as sla
 import sys
 
 class BivariateClayton:
@@ -357,7 +358,10 @@ class BivariateGaussian:
         d = stats.norm()
         x = d.ppf(u)
         y = d.ppf(v)
-        return self.multivariate_normal_pdf(x,y)/(d.pdf(x)*d.pdf(y))
+        smallnum = np.finfo(float).eps
+        numerator = self.multivariate_normal_pdf(x,y)
+        denominator = np.exp(d.logpdf(x) + d.logpdf(y))
+        return np.maximum(numerator/(denominator+smallnum),smallnum)
 
     def cdf(self,u,v):
         """
@@ -446,7 +450,10 @@ class BivariateStudentsT:
         d = stats.t(df=self.df)
         x = d.ppf(u)
         y = d.ppf(v)
-        return self.multivariate_t_pdf(x,y)/(d.pdf(x)*d.pdf(y))
+        smallnum = np.finfo(float).eps
+        numerator = self.multivariate_t_pdf(x,y)
+        denominator = np.exp(d.logpdf(x) + d.logpdf(y))
+        return np.maximum(numerator/(denominator+smallnum),smallnum)
 
     def cdf(self,u,v):
         """
@@ -695,10 +702,10 @@ class StudentsTCopula(BivariateStudentsT):
         LL = np.sum(weights*np.log(self.pdf(u,v)))
         return(LL)
     
-def weighted_empirical_cdf(x,weights=None):
+def empirical_cdf(x,weights=None):
     """
     Return an empirical cumulative distribution function (CDF)
-    and inverse CDF based on weighted samples of data. 
+    and inverse CDF based on samples of data. 
     
     param: x: sampled values of x
     param: weights: weights associated with sampled values of x
@@ -719,7 +726,7 @@ def weighted_empirical_cdf(x,weights=None):
     
     return(cdf,inv_cdf)
     
-def best_fit_archimedean_copula(u,v,weights=None):
+def fit_archimedean_copula(u,v,family_options=['Clayton','Frank','Gumbel','Joe'],rotation_options=[0,90,180,270],weights=None):
     """
     Determine the best-fit Archimedean copula based on maximum likelihood estimation.
     
@@ -729,9 +736,7 @@ def best_fit_archimedean_copula(u,v,weights=None):
     """
     
     smallnum = 1e-6
-    family_options = ['Clayton','Frank','Gumbel','Joe']
-    family_support = [[0,50],[0,25],[1,50],[1,50]]
-    rotation_options = [0,90,180,270]
+    family_support = {'Clayton':[0,50],'Frank':[0,25],'Gumbel':[1,50],'Joe':[1,50]}
     
     best_family = family_options[0]
     best_rotation = rotation_options[0]
@@ -741,7 +746,7 @@ def best_fit_archimedean_copula(u,v,weights=None):
     for i,family in enumerate(family_options):
         for rotation in rotation_options:
             
-            bounds = family_support[i]
+            bounds = family_support[family]
             bounds[0] = bounds[0] + smallnum
             bounds[1] = bounds[1] - smallnum
             initial_guess = np.mean(bounds)
@@ -752,9 +757,7 @@ def best_fit_archimedean_copula(u,v,weights=None):
             
             theta_fit = res.x
             LL = -1*res.fun
-            
-            #print(f'{family} {rotation} {np.round(theta_fit,2)} {np.round(LL,2)}')
-            
+                        
             if LL > best_likelihood:
                             
                 best_family = family
@@ -768,110 +771,140 @@ def best_fit_archimedean_copula(u,v,weights=None):
     extra = [best_likelihood,best_theta,best_family,best_rotation]
     return(c,extra)
 
-def best_fit_elliptical_copula(u,v,weights=None):
+def fit_gaussian_copula(u,v,weights=None):
     """
-    Determine the best-fit elliptical copula based on maximum likelihood estimation.
+    Fit a gaussian copula based on maximum likelihood estimation.
     
     param: u: specified values of u
     param: v: specified values of v
     param: weights: vector of weights assigned to each (u,v) pair
     """
     smallnum = 1e-6
-    
-    # First try fitting gaussian copula
     bounds = [-1+smallnum,1-smallnum]
-    initial_guess = 0.0
-
-    # Find theta that maximizes log-likelihood for given copula
+    initial_guess = 0
+    
     obj_fun = lambda theta: -1*GaussianCopula(theta).log_likelihood(u,v,weights=weights)
     res = so.minimize_scalar(obj_fun,initial_guess,bounds=bounds)
-
+            
     theta_fit = res.x
     LL = -1*res.fun
     
-    best_family = 'Gaussian'
-    best_df = None
-    best_likelihood = LL
-    best_theta = theta_fit
-    
-    # Also try Student's t-distribution
-    # Note that variance undefined for df < 3
-    # And anything with df > 30 is approximately gaussian
-    
-    # First perform optimization to find combo of theta and df that maximizes likelihood
-    obj_fun = lambda params: -1*StudentsTCopula(params[0],params[1]).log_likelihood(u,v,weights=weights)
-    initial_guess = [0,4]
-    bounds = [[-1+smallnum,1-smallnum],[3,10]]
-    res = so.minimize(obj_fun,initial_guess,bounds=bounds)
-    theta_fit = res.x[0]
-    df_fit = res.x[1]
-    LL = -1*res.fun
-    keepgoing = LL > best_likelihood
-    
-    # After finding best-fit degrees of freedom, perform a second optimization 
-    # but enforcing df as an integer if it looks like student's t distribution is promising
-    
-    if keepgoing:
-        
-        df_low = np.floor(df_fit).astype(int)
-        df_high = np.ceil(df_fit).astype(int)
-        bounds = [-1+smallnum,1-smallnum]
-        initial_guess = 0.0
-
-        for df in [df_low,df_high]:
-            # Find theta that maximizes log-likelihood for given copula
-            obj_fun = lambda theta: -1*StudentsTCopula(theta,df).log_likelihood(u,v,weights=weights)
-            res = so.minimize_scalar(obj_fun,initial_guess,bounds=bounds)
-
-            theta_fit = res.x
-            LL = -1*res.fun
-
-            if LL > best_likelihood:
-                best_family = 'StudentsT'            
-                best_df = df
-                best_likelihood = LL
-                best_theta = theta_fit
-    
-    if best_family == 'Gaussian':
-        print(f'Best fit elliptical copula: {best_family}(theta={np.round(best_theta,2)})')
-        print(f'Log-likelihood: {np.round(best_likelihood,2)}\n')
-        c = GaussianCopula(best_theta)
-    else:
-        print(f'Best fit elliptical copula: {best_family}(theta={np.round(best_theta,2)}, df={best_df})')
-        print(f'Log-likelihood: {np.round(best_likelihood,2)}\n')
-        c = StudentsTCopula(best_theta,best_df)
-        
-    extra = [best_likelihood,best_theta,best_family,best_df]
-            
+    print(f'Best fit Gaussian copula: GaussianCopula(theta={np.round(theta_fit,2)})')
+    print(f'Log-likelihood: {np.round(LL,2)}\n')
+    c = GaussianCopula(theta_fit)
+    extra = [LL,theta_fit]
     return(c,extra)
 
-def best_fit_copula(u,v,weights=None):
+class MultivariateGaussianCopula:
     """
-    Determine the best-fit copula based on maximum likelihood estimation. 
-    
-    param: u: specified values of u
-    param: v: specified values of v
-    param: weights: vector of weights assigned to each (u,v) pair
+    Multivariate gaussian copula class - supports arbitrary number of variables
     """
-    
-    c1,extra1 = best_fit_archimedean_copula(u,v,weights=weights)
-    c2,extra2 = best_fit_elliptical_copula(u,v,weights=weights)
-    
-    if extra1[0] >= extra2[0]:
-        c = c1
-        extra = extra2
-        best_likelihood,best_theta,best_family,best_rotation = extra1
-        print(f'Best fit copula: {best_family}(theta={np.round(best_theta,2)}, rotation={best_rotation})')
-        print(f'Log-likelihood: {np.round(best_likelihood,2)}\n')
-    else:
-        c = c2
-        extra = extra2
-        best_likelihood,best_theta,best_family,best_df = extra2
-        if best_family == 'StudentsT':
-            print(f'Best fit copula: {best_family}(theta={np.round(best_theta,2)}, df={best_df})')
-        else:
-            print(f'Best fit copula: {best_family}(theta={np.round(best_theta,2)})')
+    def __init__(self,R):
+        """
+        param: R: correlation matrix (d x d array)
+        """
+        # Check that R is a valid correlation matrix
+        cond1 = sla.issymmetric(R)
+        cond2 = np.allclose(np.diag(R),1)
+        cond3 = (np.max(np.abs(R)) <= 1)
             
-        print(f'Log-likelihood: {np.round(best_likelihood,2)}\n')
+        if not cond1&cond2&cond3:
+            raise ValueError('Matrix R is not a valid correlation matrix.')
         
-    return(c,extra)
+        self.R = R
+        
+        # Extra attributes specific to gaussian distribution
+        self.mv_norm = stats.multivariate_normal(cov=R)
+        
+    def pdf(self,uu):
+        """
+        param: uu: array of m realizations of d uniform random variables (m x d array)
+        returns: probability density
+        """
+        d = stats.norm()
+        zz = d.ppf(uu)
+        smallnum = np.finfo(float).eps
+        numerator = self.mv_norm.pdf(zz)
+        denominator = np.exp(np.sum(d.logpdf(zz),axis=1))
+        return np.maximum(numerator/(denominator+smallnum),smallnum)
+
+    def cdf(self,uu):
+        """
+        param: uu: array of m realizations of d uniform random variables (m x d array)
+        returns: probability that U1 ≤ u1, U2 ≤ u2, ..., Ud ≤ ud for each of the m observations
+        """
+        d = stats.norm()
+        zz = d.ppf(uu)
+        return self.mv_norm.cdf(zz)
+    
+    def simulate_values(self,n):
+        """
+        Randomly draw values from parameterized multivariate gaussian copula. 
+        
+        param: n: number of realizations to simulate
+        param: uu: array of n simulated realizations of d uniform random variables (n x d array)
+        """
+        d = stats.norm()
+        zz = self.mv_norm.rvs(size=n)
+        uu = d.cdf(zz)
+        return(uu)
+    
+    def conditional_distribution(self,u):
+        """
+        Given the depedence structure of the gaussian copula and known values of variables, determine the 
+        multivariate gaussian distribution that characterizes the conditional copula of unknown variables.
+        
+        See: https://en.wikipedia.org/wiki/Multivariate_normal_distribution#Conditional_distributions
+        
+        param: u: one realization of d uniform random variables (m x d array) with unknown values represented by np.nan 
+        returns: cond_mv_norm: multivariate guassian distribution of unknown vars conditioned on known vars
+        returns: known_cols: column indicies associated with known vars
+        returns: unknown_cols: column indices associated with unknown vars
+        """
+        known_cols = np.where(~np.isnan(u))[0]
+        unknown_cols = np.where(np.isnan(u))[0]
+        n_known = len(known_cols)
+        n_unknown = len(unknown_cols)
+        
+        d = stats.norm()
+        z_known = d.ppf(u[known_cols])
+
+        R11 = self.R[unknown_cols,:][:,unknown_cols]
+        R22 = self.R[known_cols,:][:,known_cols]
+        R12 = self.R[unknown_cols,:][:,known_cols]
+        R21 = R12.T
+
+        R22_inv = np.linalg.inv(R22)
+
+        mu = R12 @ R22_inv @ z_known
+        sigma = R11 - R12 @ R22_inv @ R21
+
+        cond_mv_norm = stats.multivariate_normal(mean=mu,cov=sigma)
+        
+        return(cond_mv_norm,known_cols,unknown_cols)
+        
+    def conditional_simulation(self,uu):
+        """
+        param: uu: array of m realizations of d uniform random variables (m x d array) with unknown values represented by np.nan
+        returns: uu_sim: input array with missing values drawn 
+        """
+        d = stats.norm()
+        uu_sim = uu.copy()
+        
+        for i in range(uu_sim.shape[0]):
+            
+            # Get gaussian distribution conditional on realization of u
+            u = uu_sim[i]
+            cond_mv_norm,known_cols,unknown_cols = self.conditional_distribution(u)
+            
+            # Simulate from conditoinal gaussian distribution
+            z_cond_sim = cond_mv_norm.rvs()
+            
+            # Transform back to a uniform variable
+            u_cond_sim = d.cdf(z_cond_sim)
+            uu_sim[i,unknown_cols] = u_cond_sim
+            
+        return(uu_sim)
+            
+            
+            
