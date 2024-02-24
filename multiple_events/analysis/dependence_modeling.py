@@ -732,9 +732,14 @@ class empirical_distribution:
 
         self.cdf = interp.interp1d(x,F,kind='linear',bounds_error=False,fill_value=(0,1))
         self.ppf = interp.interp1d(F,x,kind='linear',bounds_error=False,fill_value=(np.min(x),np.max(x)))
-        self.rvs = lambda n=1: self.ppf(stats.uniform().rvs(n))
         self.kde = stats.gaussian_kde(x,weights=weights)
-        self.pdf = np.vectorize(lambda z: self.kde.pdf(z))
+        self.pdf = np.vectorize(self.kde.pdf)
+        
+    def rvs(self,n=1):
+        """
+        Randomly draw values from empirical distribution using inverse transform sampling
+        """
+        return self.ppf(stats.uniform().rvs(n))
         
 def fit_archimedean_copula(u,v,family_options=['Clayton','Frank','Gumbel','Joe'],rotation_options=[0,90,180,270],weights=None):
     """
@@ -791,7 +796,8 @@ def fit_gaussian_copula(u,v,weights=None):
     """
     smallnum = 1e-6
     bounds = [-1+smallnum,1-smallnum]
-    initial_guess = 0
+    d = stats.norm()
+    initial_guess = stats.pearsonr(d.ppf(u),d.ppf(v)).statistic
     
     obj_fun = lambda theta: -1*GaussianCopula(theta).log_likelihood(u,v,weights=weights)
     res = so.minimize_scalar(obj_fun,initial_guess,bounds=bounds)
