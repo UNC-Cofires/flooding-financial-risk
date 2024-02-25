@@ -120,7 +120,7 @@ for census_year in hmda_df['census_year'].unique():
 n_end = len(hmda_df)
 percent_match = np.round(100*(n_end/n_begin),2)
 
-print(f'Matched {n_end} / {n_begin} ({percent_match}%) loans to census tracts.')
+print(f'Matched {n_end} / {n_begin} ({percent_match}%) loans to census tracts.',flush=True)
 
 # "Unround" income and loan amount columns (which are rounded to nearest 1000)
 hmda_df['loan_amount'] = unround_number(hmda_df['loan_amount'],multiple=1000)

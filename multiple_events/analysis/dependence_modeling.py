@@ -780,8 +780,8 @@ def fit_archimedean_copula(u,v,family_options=['Clayton','Frank','Gumbel','Joe']
                 best_likelihood = LL
                 best_theta = theta_fit
                 
-    print(f'Best fit Archimedean copula: {best_family}(theta={np.round(best_theta,2)}, rotation={best_rotation})')
-    print(f'Log-likelihood: {np.round(best_likelihood,2)}\n')
+    print(f'Best fit Archimedean copula: {best_family}(theta={np.round(best_theta,2)}, rotation={best_rotation})',flush=True)
+    print(f'Log-likelihood: {np.round(best_likelihood,2)}\n',flush=True)
     c = ArchimedeanCopula(theta=best_theta,family=best_family,rotation=best_rotation)
     extra = [best_likelihood,best_theta,best_family,best_rotation]
     return(c,extra)
@@ -797,6 +797,10 @@ def fit_gaussian_copula(u,v,weights=None):
     smallnum = 1e-6
     bounds = [-1+smallnum,1-smallnum]
     d = stats.norm()
+    
+    u = np.minimum(np.maximum(u,smallnum),1-smallnum)
+    v = np.minimum(np.maximum(v,smallnum),1-smallnum)
+    
     initial_guess = stats.pearsonr(d.ppf(u),d.ppf(v)).statistic
     
     obj_fun = lambda theta: -1*GaussianCopula(theta).log_likelihood(u,v,weights=weights)
@@ -805,8 +809,8 @@ def fit_gaussian_copula(u,v,weights=None):
     theta_fit = res.x
     LL = -1*res.fun
     
-    print(f'Best fit Gaussian copula: GaussianCopula(theta={np.round(theta_fit,2)})')
-    print(f'Log-likelihood: {np.round(LL,2)}\n')
+    print(f'Best fit Gaussian copula: GaussianCopula(theta={np.round(theta_fit,2)})',flush=True)
+    print(f'Log-likelihood: {np.round(LL,2)}\n',flush=True)
     c = GaussianCopula(theta_fit)
     extra = [LL,theta_fit]
     return(c,extra)
