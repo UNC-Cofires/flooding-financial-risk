@@ -709,10 +709,11 @@ class empirical_distribution:
     Class for modeling the empirical distribution of a random variable based on samples of data. 
     """
     
-    def __init__(self,x,weights=None):
+    def __init__(self,x,weights=None,estimate_pdf=True):
         """
         param: x: sampled values of x
         param: weights: weights associated with sampled values of x
+        param: estimate_pdf: if true, estimate the PDF of the distribution using kernel-density estimation (can disable to speed things up)
         """
     
         if weights is None:
@@ -732,8 +733,10 @@ class empirical_distribution:
 
         self.cdf = interp.interp1d(x,F,kind='linear',bounds_error=False,fill_value=(0,1))
         self.ppf = interp.interp1d(F,x,kind='linear',bounds_error=False,fill_value=(np.min(x),np.max(x)))
-        self.kde = stats.gaussian_kde(x,weights=weights)
-        self.pdf = np.vectorize(self.kde.pdf)
+        
+        if estimate_pdf:
+            self.kde = stats.gaussian_kde(x,weights=weights)
+            self.pdf = np.vectorize(self.kde.pdf)
         
     def rvs(self,n=1):
         """

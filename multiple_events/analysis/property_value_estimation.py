@@ -266,7 +266,7 @@ for i,(train_indices,test_indices) in enumerate(kf.split(sales)):
     SK = stk.SimpleKriging(hard_points,krig_points,'residual',spatial_column='geometry',temporal_column='time_val')    
     SK.build_distance_matrices(5000,np.inf)
     SK.estimate_variogram(Cst,spatial_lags,temporal_lags,options={'tol':0.0001})
-    z_k,sigma_k = SK.krig_values(n_max=250,n_min=50)
+    z_k,sigma_k = SK.krig_values(n_max=100,n_min=10)
     
     y_k = z_k + model.predict(X_k)
     sigma_k[np.isnan(sigma_k)] = np.std(SK.z_h)
@@ -314,8 +314,8 @@ model = RandomForestRegressor(**hyperparams).fit(X_h,y_h)
 z_h = y_h - model.predict(X_h)
 sales['residual'] = z_h
 
-# To reduce memory consumption, perform kriging in chunks of 250k
-chunksize=250000
+# To reduce memory consumption, perform kriging in chunks of 300k
+chunksize=300000
 n_chunks = np.ceil(len(property_timepoints)/chunksize).astype(int)
 krig_list = []
 
@@ -332,7 +332,7 @@ for i,krig_points in enumerate(np.array_split(property_timepoints,n_chunks)):
     SK = stk.SimpleKriging(sales,krig_points,'residual',spatial_column='geometry',temporal_column='time_val')    
     SK.build_distance_matrices(5000,np.inf)
     SK.estimate_variogram(Cst,spatial_lags,temporal_lags,options={'tol':0.0001})
-    z_k,sigma_k = SK.krig_values(n_max=250,n_min=50)
+    z_k,sigma_k = SK.krig_values(n_max=100,n_min=10)
 
     y_k = z_k + model.predict(X_k)
     sigma_k[np.isnan(sigma_k)] = np.std(SK.z_h)
