@@ -4,10 +4,10 @@
 #SBATCH -N 1
 #SBATCH -n 1
 #SBATCH --mem=250g
-#SBATCH -t 4-00:00:00
+#SBATCH -t 11-00:00:00
 #SBATCH --mail-type=all
 #SBATCH --mail-user=kieranf@email.unc.edu
-#SBATCH --array=0-35
+#SBATCH --array=4
 cd /proj/characklab/flooddata/NC/multiple_events/analysis
 module purge
 module load anaconda/2023.03
