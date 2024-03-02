@@ -41,8 +41,8 @@ n_cores = int(os.environ['SLURM_NTASKS'])
 # Specify current working directory
 pwd = os.getcwd()
     
-# Determine which group of counties to include in estimation
-group_path = os.path.join(pwd,'property_value_county_groups.csv')
+# Determine which group of census tracts to include in estimation
+group_path = os.path.join(pwd,'kriging_neighborhoods.csv')
 group_df = pd.read_csv(group_path)
 group_idx = int(os.environ['SLURM_ARRAY_TASK_ID'])
 group = group_df.loc[group_idx].to_dict()
@@ -56,14 +56,14 @@ if not os.path.exists(outfolder):
 ### *** LOAD DATA SOURCES *** ###
 crs = 'EPSG:32617'
 
-# Read in data on NC counties
-counties_path = '/proj/characklab/flooddata/NC/multiple_events/geospatial_data/NC_counties'
-counties = gpd.read_file(counties_path).to_crs(crs)
-counties = counties[['FIPS','geometry']].rename(columns={'FIPS':'countyCode'})
+# Read in data on NC census tracts
+census_tracts_path = f'/proj/characklab/flooddata/NC/multiple_events/geospatial_data/TIGER/nc_2010_census_tracts_clean'
+census_tracts = gpd.read_file(census_tracts_path).to_crs(crs)
+census_tracts = census_tracts.rename(columns={'GEOID':'censusTract'})
 
 # Define study area
-included_counties = group['counties'].split(',')
-study_area = counties[counties['countyCode'].isin(included_counties)].dissolve()['geometry'].values[0]
+included_tracts = group['census_tracts'].split(',')
+study_area = census_tracts[census_tracts['censusTract'].isin(included_tracts)].dissolve()['geometry'].values[0]
 
 # Apply a 5km buffer so that we avoid edge effects 
 buffer = 5000
