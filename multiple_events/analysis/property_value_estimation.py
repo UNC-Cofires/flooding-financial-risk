@@ -315,7 +315,7 @@ z_h = y_h - model.predict(X_h)
 sales['residual'] = z_h
 
 # To reduce memory consumption, perform kriging in chunks
-chunksize=250000 - len(sales)
+chunksize=150000 - len(sales)
 n_chunks = np.ceil(len(property_timepoints)/chunksize).astype(int)
 krig_list = []
 
