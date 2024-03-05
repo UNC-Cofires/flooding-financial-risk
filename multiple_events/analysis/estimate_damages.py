@@ -165,15 +165,15 @@ openfema_claims['countyCode'] = openfema_claims['countyCode'].astype(str).apply(
 openfema_claims['censusTract'] = openfema_claims['censusTract'].astype(str).apply(lambda x: x[:-2])
 openfema_claims['reportedZipCode'] = openfema_claims['reportedZipCode'].apply(lambda x: str(x).split('.')[0])
 openfema_claims['nfipRatedCommunityNumber'] = openfema_claims['nfipRatedCommunityNumber'].apply(lambda x: str(x).split('.')[0][:6])
-openfema_claims['dateOfLoss'] = openfema_claims['dateOfLoss'].astype(np.datetime64)
+openfema_claims['dateOfLoss'] = pd.to_datetime(openfema_claims['dateOfLoss'])
 openfema_claims['floodZone'] = openfema_claims['floodZone'].astype(str)
 
 openfema_policies['countyCode'] = openfema_policies['countyCode'].astype(str).apply(lambda x: x[2:-2])
 openfema_policies['censusTract'] = openfema_policies['censusTract'].astype(str).apply(lambda x: x[:-2])
 openfema_policies['reportedZipCode'] = openfema_policies['reportedZipCode'].apply(lambda x: str(x).split('.')[0])
 openfema_policies['nfipRatedCommunityNumber'] = openfema_policies['nfipRatedCommunityNumber'].apply(lambda x: str(x).split('.')[0][:6])
-openfema_policies['policyEffectiveDate'] = openfema_policies['policyEffectiveDate'].astype(np.datetime64)
-openfema_policies['policyTerminationDate'] = openfema_policies['policyTerminationDate'].astype(np.datetime64)
+openfema_policies['policyEffectiveDate'] = pd.to_datetime(openfema_policies['policyEffectiveDate'])
+openfema_policies['policyTerminationDate'] = pd.to_datetime(openfema_policies['policyTerminationDate'])
 openfema_policies['floodZone'] = openfema_policies['floodZone'].astype(str)
 
 # Create binary variable denoting location inside/outside SFHA
@@ -197,8 +197,8 @@ edf_policies = edf_policies[edf_policies['STATE']=='NC']
 edf_policies = edf_policies[edf_policies['nfipRatedCommunityNumber'].apply(lambda x: x.startswith('37'))]
 
 # Format columns
-edf_policies['policyEffectiveDate'] = edf_policies['policyEffectiveDate'].astype(np.datetime64)
-edf_policies['policyTerminationDate'] = edf_policies['policyTerminationDate'].astype(np.datetime64)
+edf_policies['policyEffectiveDate'] = pd.to_datetime(edf_policies['policyEffectiveDate'])
+edf_policies['policyTerminationDate'] = pd.to_datetime(edf_policies['policyTerminationDate'])
 edf_policies['nfipRatedCommunityNumber'] = edf_policies['nfipRatedCommunityNumber'].apply(lambda x: x[:6])
 edf_policies['policyCount']=1
 
