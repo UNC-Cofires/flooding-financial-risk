@@ -22,11 +22,11 @@ relevant_environment_vars = ['SLURM_NTASKS',
                              'NUMEXPR_NUM_THREADS']
 
 for environment_var in relevant_environment_vars:
-    try: 
+    try:
         print(f'{environment_var}:',os.environ[environment_var],flush=True)
     except:
         pass
-    
+
 # Specify current working directory
 pwd = os.getcwd()
 
@@ -218,22 +218,6 @@ auxiliary_keepcols_policies = ['countyCode','censusTract','reportedZipCode','nfi
 auxiliary_policies = pd.concat([edf_policies,openfema_policies]).reset_index(drop=True)[auxiliary_keepcols_policies]
 auxiliary_claims = openfema_claims.reset_index(drop=True)
 
-### *** ADJUST DAMAGES FOR INFLATION *** ###
-
-# Read in data on meausures of inflation
-inflation_path = '/proj/characklab/flooddata/NC/multiple_events/financial_data/inflation_measures.csv'
-inflation = pd.read_csv(inflation_path)
-inflation['DATE'] = inflation['DATE'].astype(np.datetime64)
-
-# Reference date used when adjusting for inflation (e.g., convert all costs to 2020 USD)
-reference_date = '2020-01-01'
-reference_row = inflation[inflation['DATE'] >= reference_date].iloc[0]
-nominal_row = inflation[inflation['DATE'] >= event['peak_date']].iloc[0]
-
-# Select measure of inflation to use and calculate multiplier
-inflation_measure = 'USACPIALLMINMEI' # CPI - All items for United States
-inflation_multiplier = reference_row[inflation_measure]/nominal_row[inflation_measure]
-
 ### *** DEFINE EVENT BOUNDARIES *** ###
 
 # Define study area and period
@@ -256,14 +240,14 @@ if peak_date >= openfema_date:
 else:
     auxiliary_units = ZCTAs
     unit_name = 'reportedZipCode'
-    
+
 ### *** INITIALIZE FLOOD EVENT OBJECT *** ###
 floodevent = fp.FloodEvent(study_area,start_date,end_date,peak_date,crs,auxiliary_units)
-floodevent.preprocess_data(parcels,buildings,claims,policies,inflation_multiplier)
+floodevent.preprocess_data(parcels,buildings,claims,policies)
 
 # Use OpenFEMA data to determine where policies are missing.
 # Based on this information, generate pseudo-absences
-floodevent.preprocess_auxiliary(auxiliary_claims,auxiliary_policies,unit_name,inflation_multiplier)
+floodevent.preprocess_auxiliary(auxiliary_claims,auxiliary_policies,unit_name)
 floodevent.stratify_missing([unit_name,'SFHA'])
 floodevent.create_pseudo_absences()
 floodevent.crop_to_study_area()
