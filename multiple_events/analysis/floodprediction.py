@@ -646,8 +646,8 @@ class FloodEvent:
 
         # Convert date columns to pandas datatime format
         auxiliary_claims['dateOfLoss'] = pd.to_datetime(auxiliary_claims['dateOfLoss']).dt.tz_localize(None)
-        auxiliary_policies['policyEffectiveDate'] = pd.to_datetime(auxiliary_policies['policyEffectiveDate']).dt.tz_localize(None)
-        auxiliary_policies['policyTerminationDate'] = pd.to_datetime(auxiliary_policies['policyTerminationDate']).dt.tz_localize(None)
+        auxiliary_policies['policyEffectiveDate'] = pd.to_datetime(auxiliary_policies['policyEffectiveDate'],utc=True).dt.tz_localize(None)
+        auxiliary_policies['policyTerminationDate'] = pd.to_datetime(auxiliary_policies['policyTerminationDate'],utc=True).dt.tz_localize(None)
 
         # Get claims with non-zero payout associated with dates of event
         claims_filter = (auxiliary_claims['dateOfLoss'] >= self.start_date)
