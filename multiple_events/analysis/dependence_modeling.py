@@ -5,6 +5,7 @@ import scipy.optimize as so
 import scipy.interpolate as interp
 import scipy.linalg as sla
 import pandas as pd
+import matplotlib.pyplot as plt
 import itertools
 import sys
 
@@ -1075,7 +1076,57 @@ class DependenceModel:
             return xx_sim        
         
         
-        
+def jointplot(df,color='C0',hist_alpha=0.5,scatter_alpha=0.1,fontsize=10,figsize=(10,10)):
+    """
+    Function to create a joint distribution plot from dataframe columns
+    
+    param: df: dataframe from which to create a joint distribution plot with each column corresponding to a variable
+    """
+    variables = list(df.columns)
+    n = len(variables)
+
+    fig,axes = plt.subplots(nrows=n,ncols=n,figsize=figsize)
+
+    for i in range(n):
+        for j in range(n):
+
+            ax = axes[i,j]
+
+            if j > i:
+
+                ax.axis('off')
+
+            elif i==j:
+
+                var1 = variables[i]
+                ax.hist(df[var1],density=True,color=color,alpha=hist_alpha)
+                ax.set_title(var1,fontsize=fontsize)
+
+                if i!=(n-1):
+                    ax.set_xticks([])
+                if j!=0:
+                    ax.set_yticks([])
+
+            else:
+
+                var1 = variables[j]
+                var2 = variables[i]
+
+                ax.scatter(df[var1],df[var2],color=color,alpha=scatter_alpha)
+
+                if i==(n-1):
+                    ax.set_xlabel(var1,fontsize=fontsize)
+                else:
+                    ax.set_xticks([])
+
+                if j==0:
+                    ax.set_ylabel(var2,fontsize=fontsize)
+                else:
+                    ax.set_yticks([])
+            
+    fig.tight_layout()
+    
+    return(fig,axes)
         
         
         

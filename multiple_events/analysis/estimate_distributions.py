@@ -4,6 +4,8 @@ import geopandas as gpd
 import datetime as dt
 import matplotlib.pyplot as plt
 import scipy.stats as stats
+import pyarrow as pa
+import pyarrow.parquet as pq
 import dependence_modeling as dm
 import os
 import pickle
@@ -70,6 +72,25 @@ def drop_extreme_values(df,column,alpha=0.001):
     
     return(df[m])
 
+def monthly_payment(r,N,P):
+    """
+    This function calculates the monthly payment on a fixed-rate, fully amortizing loan. 
+    See: https://en.wikipedia.org/wiki/Mortgage_calculator
+    
+    param: r: annual interest rate on loan (expressed as a percentage from 0-100)
+    param: N: loan term (number of monthly payments)
+    param: P: loan principal (initial unpaid balance)
+    return: c: minimum monthly payment on loan
+    """
+    # Convert the annual interest rate to a monthly interest rate, and make decimal rather than percent
+    r = (r/100)/12
+    
+    if r == 0:
+        c = P/N
+    else:
+        c = r*P/(1-(1+r)**(-N))
+    return(c)
+
 ### *** SETUP FOLDERS *** ###
 
 # Specify current working directory
@@ -126,253 +147,130 @@ print(f'Matched {n_end} / {n_begin} ({percent_match}%) loans to census tracts.',
 hmda_df['loan_amount'] = unround_number(hmda_df['loan_amount'],multiple=1000)
 hmda_df['income'] = unround_number(hmda_df['income'],multiple=1000)
 
-# *** ADJUST MONETARY AMOUNTS FOR INFLATION *** #
+# *** PROCESS FANNIE MAE & FREDDIE MAC MORTGAGE ORIGINATION DATA *** ###
+gse_path = '/proj/characklab/flooddata/NC/multiple_events/financial_data/GSEs/fannie_freddie_SF_loan_level_originations.parquet'
+table = pq.read_table(gse_path,use_pandas_metadata=True)
+gse_df = table.to_pandas()
 
-# Read in data on inflation over time (as measured by consumer price index)
-inflation_path = '/proj/characklab/flooddata/NC/multiple_events/financial_data/inflation_measures.csv'
-inflation = pd.read_csv(inflation_path)
-inflation['DATE'] = pd.to_datetime(inflation['DATE'])
-inflation['year'] = inflation['DATE'].dt.year
-inflation = inflation[['year','USACPIALLMINMEI']].groupby('year').mean().reset_index()
+# Get mortgages written for purchase or refinancing of primary residence, single-family homes
+gse_df = gse_df[gse_df['occupancy_status']=='Primary']
 
-# Read in data on mortgage rates over time (as measured by the average 30-year and 15-year fixed rates)
-rate30_path = '/proj/characklab/flooddata/NC/multiple_events/financial_data/interest_rates/MORTGAGE30US.csv'
-rate15_path = '/proj/characklab/flooddata/NC/multiple_events/financial_data/interest_rates/MORTGAGE15US.csv'
+# "Unround" loan amount column (which was rounded to the nearest 1000)
+gse_df['loan_amount'] = unround_number(gse_df['loan_amount'],multiple=1000)
 
-rate30 = pd.read_csv(rate30_path)
-rate30['DATE'] = pd.to_datetime(rate30['DATE'])
-rate30['MORTGAGE30US'] = pd.to_numeric(rate30['MORTGAGE30US'],errors='coerce')
-rate30['year'] = rate30['DATE'].dt.year
-rate30 = rate30[['year','MORTGAGE30US']].groupby('year').mean().reset_index()
+# Make LTV and DTI on a 0-1 scale instead of percentages
+gse_df['oDTI'] = gse_df['oDTI']/100
+gse_df['oLTV'] = gse_df['oLTV']/100
 
-rate15 = pd.read_csv(rate15_path)
-rate15['DATE'] = pd.to_datetime(rate15['DATE'])
-rate15['MORTGAGE15US'] = pd.to_numeric(rate15['MORTGAGE15US'],errors='coerce')
-rate15['year'] = rate15['DATE'].dt.year
-rate15 = rate15[['year','MORTGAGE15US']].groupby('year').mean().reset_index()
+# *** ESTIMATE NON-MORTGAGE DEBT OBLIGATIONS *** #
 
-annual_average_rate = pd.merge(rate30,rate15)
-
-# Joint mortgage rate info to dataframe
-hmda_df = pd.merge(hmda_df,annual_average_rate,how='left',on='year')
-
-# Convert borrower income and loan amount to 2020 USD
-reference_year = 2020
-reference_cpi = inflation[inflation['year']==reference_year]['USACPIALLMINMEI'].values[0]
-inflation['multiplier'] = reference_cpi/inflation['USACPIALLMINMEI']
-
-hmda_df = pd.merge(hmda_df,inflation,how='left',on='year')
-hmda_df['nominal_loan_amount'] = hmda_df['loan_amount'].copy()
-hmda_df['nominal_income'] = hmda_df['income'].copy()
-hmda_df['loan_amount'] = hmda_df['loan_amount']*hmda_df['multiplier']
-hmda_df['income'] = hmda_df['income']*hmda_df['multiplier']
-
-# Drop most extreme values of income and/or loan amount
-# (some of these were likely coded wrong)
-hmda_df = drop_extreme_values(hmda_df,'income',alpha=0.001)
-hmda_df = drop_extreme_values(hmda_df,'loan_amount',alpha=0.001)
-
-# *** ESTIMATE DEPENDENCE OF LTV & RATE SPREAD ON INCOME & LOAN AMOUNT *** ###
-
-# Interest rate and LTV at origination is only available from 2018 onwards
-# Use this period to estimate the joint distribution of LTV and rate spread conditional on income and loan amount
+# Interest rate and DTI at origination is only available from 2018 onwards
+# Use this period to estimate ratio of mortgage to non-mortgage monthly debt payments 
 hmda_recent = hmda_df[hmda_df['year']>=2018]
 
-# Rates increased rapidly over the course of 2022
-# This means that the rate on your mortgage dependend strongly on 
-# the month of the year in which the mortgage was acquired
-#
-# Because we don't have information on the exact date of HMDA loans, and are comparing to the 
-# average rate over the entire year, this has the effect of increasing the variance of the rate spread distribution.
-#
-# For this reason, I'm excluding mortgages originated in 2022 from rate spread calculation. 
-hmda_recent = hmda_recent[hmda_recent['year'] != 2022]
-hmda_df = hmda_df[hmda_df['year'] != 2022]
+# Calculate monthly mortgage payment
+vect_monthly_payment = np.vectorize(monthly_payment)
+hmda_recent['mortgage_payment'] = vect_monthly_payment(hmda_recent['interest_rate'],hmda_recent['loan_term'],hmda_recent['loan_amount'])
 
-# Make LTV numeric, and convert from percentage to ratio
-# Note that 5-10% of mortgages have LTV > 1.0 at origination.
-# Perhaps this is for financing repairs on a newly-bought home that's a fixer-upper?
-hmda_recent['loan_to_value_ratio'] = pd.to_numeric(hmda_recent['loan_to_value_ratio'],errors='coerce')/100
-hmda_recent = hmda_recent[~hmda_recent['loan_to_value_ratio'].isna()]
+# Calculate monthly non-mortgage debt obligations from DTI, income, and mortgage payment
+hmda_recent['DTI'] = pd.to_numeric(hmda_recent['debt_to_income_ratio'],errors='coerce')/100
+hmda_recent['DTI'] = unround_number(hmda_recent['DTI'],multiple=0.01)
+hmda_recent['monthly_income'] = hmda_recent['income']/12
+hmda_recent['monthly_debt_obligations'] = np.maximum(hmda_recent['monthly_income']*hmda_recent['DTI'],hmda_recent['mortgage_payment'])
 
-# Drop most extreme values of interest rate and LTV
-hmda_recent = drop_extreme_values(hmda_recent,'interest_rate',alpha=0.001)
-hmda_recent = drop_extreme_values(hmda_recent,'loan_to_value_ratio',alpha=0.001)
+# Drop most extreme values
+hmda_recent = drop_extreme_values(hmda_recent,'monthly_debt_obligations',alpha=0.001)
+hmda_recent = drop_extreme_values(hmda_recent,'loan_amount',alpha=0.001)
+hmda_recent = drop_extreme_values(hmda_recent,'income',alpha=0.001)
+
+# Calculate proportion of total monthly debt payments that go towards mortgage
+hmda_recent['mortgage_debt_fraction'] = hmda_recent['mortgage_payment']/hmda_recent['monthly_debt_obligations']
+
+# Get distribution of mortgage debt fraction for middle 80% of borrowers 
+# (exclude extremes where people have very small mortgage loans or huge non-mortgage debts)
+x = hmda_recent['mortgage_debt_fraction']
+alpha=0.1
+x = x[(x>=x.quantile(alpha/2))&(x<=x.quantile(1-alpha/2))]
+LB = int(np.round(x.min()*100))
+UB = int(np.round(x.max()*100))
+
+print(f'For {int(100*(1-alpha))}% of borrowers, mortgage payments make up {LB}-{UB}% of their total monthly debt obligations.',flush=True)
+
+# Using distribution estimated from HMDA data, draw for mortgage debt fraction in Fannie / Freddie data
+mortgage_fraction_dist = dm.empirical_distribution(x.to_numpy())
+gse_df['mortgage_debt_fraction'] = mortgage_fraction_dist.rvs(len(gse_df))
+
+# Calculate income of Fannie / Freddie borrowers using DTI, mortgage payment, and simulated mortgage debt fraction
+gse_df['mortgage_payment'] = vect_monthly_payment(gse_df['interest_rate'],gse_df['loan_term'],gse_df['loan_amount'])
+gse_df['monthly_debt_obligations'] = gse_df['mortgage_payment']/gse_df['mortgage_debt_fraction']
+gse_df['monthly_income'] = gse_df['monthly_debt_obligations']/gse_df['oDTI']
+gse_df['income'] = 12*gse_df['monthly_income']
+
+# *** ESTIMATE DEPENDENCE OF LTV, DTI & RATE SPREAD ON INCOME & LOAN AMOUNT *** ###
+
+# Remove entries with LTV at origination of >100%
+gse_df = gse_df[gse_df['oLTV']<=1.0]
 
 # Stratify by loan term
 # For home purchase, ~90% are 30-year loans
 # For refinancing, ~55% are 30-year loans, ~20% are 15-year loans, and ~25% are other terms
-purchase30 = hmda_recent[(hmda_recent['loan_purpose']=='Home purchase')&(hmda_recent['loan_term']==360)]
-refinance30 = hmda_recent[(hmda_recent['loan_purpose']=='Refinancing')&(hmda_recent['loan_term']==360)]
-refinance15 = hmda_recent[(hmda_recent['loan_purpose']=='Refinancing')&(hmda_recent['loan_term']==180)]
+purchase30 = gse_df[(gse_df['loan_purpose']=='Purchase')&(gse_df['loan_term']==360)]
+refinance30 = gse_df[(gse_df['loan_purpose']=='Refinance')&(gse_df['loan_term']==360)]
+refinance15 = gse_df[(gse_df['loan_purpose']=='Refinance')&(gse_df['loan_term']==180)]
 
-# Calculate borrower rate spread versus the yearly average for the relevant type of mortgage
-# (Note that the HMDA dataset already includes a "rate_spread" column, but it's not clear what comparator they use, so we'll overwrite it)
-purchase30['rate_spread'] = purchase30['interest_rate'] - purchase30['MORTGAGE30US']
-refinance30['rate_spread'] = refinance30['interest_rate'] - refinance30['MORTGAGE30US']
-refinance15['rate_spread'] = refinance15['interest_rate'] - refinance15['MORTGAGE15US']
+# Select relevant benchmark to compare interest rate against
+purchase30['rate_spread'] = purchase30['spread_vs_MORTGAGE30US']
+refinance30['rate_spread'] = refinance30['spread_vs_MORTGAGE30US']
+refinance15['rate_spread'] = refinance15['spread_vs_MORTGAGE15US']
 
-# Model joint distribution of income, loan amount, LTV, and rate spread using empirical marginals + guassian copula
+# Model joint distribution of income, loan amount, LTV, DTI, and rate spread using empirical marginals + guassian copula
 # Assume that the dependence between these variables doesn't vary within the state
 # (i.e., LTV and rate spread are just as correlated in Raleigh as they are in New Bern)
+variables = ['income','loan_amount','oLTV','oDTI','rate_spread']
 
-variables = ['income','loan_amount','loan_to_value_ratio','rate_spread']
-purchase30_marginals = {}
-refinance30_marginals = {}
-refinance15_marginals = {}
+# Stratify joint distributions by year and loan type
+statelevel_distributions_by_year = {}
 
-for var in variables:
-    purchase30_marginals[var] = dm.empirical_distribution(purchase30[var].to_numpy())
-    refinance30_marginals[var] = dm.empirical_distribution(refinance30[var].to_numpy())
-    refinance15_marginals[var] = dm.empirical_distribution(refinance15[var].to_numpy())
+for year in np.arange(1999,2020):
 
-purchase30_LTV_rate_depmod = dm.DependenceModel(purchase30_marginals)
-purchase30_LTV_rate_depmod.fit_dependence(purchase30[variables])
+    p30 = purchase30[purchase30['origination_year']==year]
+    r30 = refinance30[refinance30['origination_year']==year]
+    r15 = refinance30[refinance30['origination_year']==year]
 
-refinance30_LTV_rate_depmod = dm.DependenceModel(refinance30_marginals)
-refinance30_LTV_rate_depmod.fit_dependence(refinance30[variables])
+    p30_marginals = {}
+    r30_marginals = {}
+    r15_marginals = {}
 
-refinance15_LTV_rate_depmod = dm.DependenceModel(refinance15_marginals)
-refinance15_LTV_rate_depmod.fit_dependence(refinance15[variables])
+    for var in variables:
+        p30_marginals[var] = dm.empirical_distribution(r30[var].to_numpy())
+        r30_marginals[var] = dm.empirical_distribution(r30[var].to_numpy())
+        r15_marginals[var] = dm.empirical_distribution(r15[var].to_numpy())
 
-# Save results
-outname = os.path.join(outfolder,'purchase30_LTV_rate_depmod.object')
+    print(f'\n#---------- {year}: Purchase30 ----------#\n',flush=True)
+
+    p30_depmod = dm.DependenceModel(p30_marginals)
+    p30_depmod.fit_dependence(p30[variables])
+
+    print(f'\n#---------- {year}: Refinance30 ----------#\n',flush=True)
+
+    r30_depmod = dm.DependenceModel(r30_marginals)
+    r30_depmod.fit_dependence(r30[variables])
+
+    print(f'\n#---------- {year}: Refinance15 ----------#\n',flush=True)
+
+    r15_depmod = dm.DependenceModel(r15_marginals)
+    r15_depmod.fit_dependence(r15[variables])
+    
+    statelevel_distributions_by_year[year] = {'purchase30':p30_depmod,'refinance30':r30_depmod,'refinance15':r15_depmod}
+    
+### *** SAVE RESULTS AND DATA USED TO PARAMETERIZE DISTRIBUTIONS *** ###
+outname = os.path.join(outfolder,'statelevel_distributions_by_year.object')
 with open(outname,'wb') as f:
-    pickle.dump(purchase30_LTV_rate_depmod,f)
+    pickle.dump(statelevel_distributions_by_year,f)
     f.close()
     
-outname = os.path.join(outfolder,'refinance30_LTV_rate_depmod.object')
-with open(outname,'wb') as f:
-    pickle.dump(refinance30_LTV_rate_depmod,f)
-    f.close()
-    
-outname = os.path.join(outfolder,'refinance15_LTV_rate_depmod.object')
-with open(outname,'wb') as f:
-    pickle.dump(refinance15_LTV_rate_depmod,f)
-    f.close()
-    
-# *** ESTIMATE MARGINAL DISTRIBUTIONS OF INCOME & LOAN AMOUNT BY YEAR FOR ENTIRE PERIOD *** #
+outname = os.path.join(outfolder,'hmda_mortgage_originations.csv')
+hmda_df.to_csv(outname)
 
-def get_income_loan_dist_by_year(df):
-    """
-    param: df: subset of HMDA data we want to estimate income / loan amount distributions for (e.g., 30-year fixed rate home purchases)
-    """
-    
-    # First get state-level distributions
-    statelevel_income_loan_dist_by_year = {}
-
-    for year in df['year'].unique():
-
-        marginals = {}
-
-        # Get distribution of income / loan amount in real terms (i.e., adjusted for inflation to 2020 USD)
-        income = df[df['year']==year]['income'].to_numpy()
-        loan_amount = df[df['year']==year]['loan_amount'].to_numpy()
-        marginals['income'] = dm.empirical_distribution(income)
-        marginals['loan_amount'] = dm.empirical_distribution(loan_amount)
-
-        # Also get distribution of income / loan amount in nominal terms
-        nominal_income = df[df['year']==year]['nominal_income'].to_numpy()
-        nominal_loan_amount = df[df['year']==year]['nominal_loan_amount'].to_numpy()
-        marginals['nominal_income'] = dm.empirical_distribution(nominal_income)
-        marginals['nominal_loan_amount'] = dm.empirical_distribution(nominal_loan_amount)
-
-        statelevel_income_loan_dist_by_year[year] = marginals
-        
-    # Then get tract-level distributions
-    tractlevel_income_loan_dist_by_year = {}
-
-    for year in df['year'].unique():
-
-        df_year = df[df['year']==year]
-        tract_dict = {}
-
-        for tract in np.sort(df_year['census_tract'].unique()):
-
-            marginals = {}
-
-            m = (df_year['census_tract']==tract)
-            n_obs = np.sum(m)
-            marginals['n_obs'] = n_obs
-
-            if n_obs > 1:
-
-                # Get distribution of income / loan amount in real terms (i.e., adjusted for inflation to 2020 USD)
-                income = df_year[m]['income'].to_numpy()
-                loan_amount = df_year[m]['loan_amount'].to_numpy()
-                marginals['income'] = dm.empirical_distribution(income,estimate_pdf=False)
-                marginals['loan_amount'] = dm.empirical_distribution(loan_amount,estimate_pdf=False)
-
-                # Also get distribution of income / loan amount in nominal terms
-                nominal_income = df_year[m]['nominal_income'].to_numpy()
-                nominal_loan_amount = df_year[m]['nominal_loan_amount'].to_numpy()
-                marginals['nominal_income'] = dm.empirical_distribution(nominal_income,estimate_pdf=False)
-                marginals['nominal_loan_amount'] = dm.empirical_distribution(nominal_loan_amount,estimate_pdf=False)
-
-            else:
-
-                marginals['income'] = df_year[m]['income'].values[0]
-                marginals['loan_amount'] = df_year[m]['loan_amount'].values[0]
-                marginals['nominal_income'] = df_year[m]['nominal_income'].values[0]
-                marginals['nominal_loan_amount'] = df_year[m]['nominal_loan_amount'].values[0]
-
-            tract_dict[tract] = marginals
-
-        tractlevel_income_loan_dist_by_year[year] = tract_dict
-        
-    return(statelevel_income_loan_dist_by_year,tractlevel_income_loan_dist_by_year)
-
-# For recent data, we could break up into purchase30, refinance30, and refinance15
-# However, older data is missing information on loan term, so we can only break up into purchase and refinance
-
-purchase = hmda_df[hmda_df['loan_purpose']=='Home purchase']
-refinance = hmda_df[hmda_df['loan_purpose']=='Refinancing']
-
-purchase_statelevel_income_loan_dist,purchase_tractlevel_income_loan_dist = get_income_loan_dist_by_year(purchase)
-refinance_statelevel_income_loan_dist,refinance_tractlevel_income_loan_dist = get_income_loan_dist_by_year(refinance)
-
-#Save results
-outname = os.path.join(outfolder,'purchase_statelevel_income_loan_dist.object')
-with open(outname,'wb') as f:
-    pickle.dump(purchase_statelevel_income_loan_dist,f)
-    f.close()
-    
-outname = os.path.join(outfolder,'purchase_tractlevel_income_loan_dist.object')
-with open(outname,'wb') as f:
-    pickle.dump(purchase_tractlevel_income_loan_dist,f)
-    f.close()
-    
-outname = os.path.join(outfolder,'refinance_statelevel_income_loan_dist.object')
-with open(outname,'wb') as f:
-    pickle.dump(refinance_statelevel_income_loan_dist,f)
-    f.close()
-    
-outname = os.path.join(outfolder,'refinance_tractlevel_income_loan_dist.object')
-with open(outname,'wb') as f:
-    pickle.dump(refinance_tractlevel_income_loan_dist,f)
-    f.close()
-    
-### *** SAVE DATA USED TO CREATE DISTRIBUTIONS *** ###
-
-# Drop specific columns from HMDA data before saving
-# (these ones can't be trusted and are mostly missing for older time periods, so best to leave them out)
-cols_to_drop = ['rate_spread','property_value','loan_to_value_ratio','debt_to_income_ratio','interest_rate','loan_term']
-
-purchase = purchase.drop(columns=cols_to_drop)
-refinance = refinance.drop(columns=cols_to_drop)
-
-outname = os.path.join(outfolder,'hmda_mortgage_originations_purchase.csv')
-purchase.to_csv(outname,index=False)
-
-outname = os.path.join(outfolder,'hmda_mortgage_originations_refinance.csv')
-refinance.to_csv(outname,index=False)
-
-# Also save more recent data used to characterize LTV and rate spread distribution
-outname = os.path.join(outfolder,'recent_hmda_mortgage_originations_purchase30.csv')
-purchase30.to_csv(outname,index=False)
-
-outname = os.path.join(outfolder,'recent_hmda_mortgage_originations_refinance30.csv')
-refinance30.to_csv(outname,index=False)
-
-outname = os.path.join(outfolder,'recent_hmda_mortgage_originations_refinance15.csv')
-refinance15.to_csv(outname,index=False)
+outname = os.path.join(outfolder,'gse_mortgage_originations.parquet')
+gse_df.to_parquet(outname)

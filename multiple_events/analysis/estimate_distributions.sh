@@ -4,7 +4,7 @@
 #SBATCH -N 1
 #SBATCH -n 1
 #SBATCH --mem=64g
-#SBATCH -t 3-00:00:00
+#SBATCH -t 4-00:00:00
 #SBATCH --mail-type=all
 #SBATCH --mail-user=kieranf@email.unc.edu
 cd /proj/characklab/flooddata/NC/multiple_events/analysis
