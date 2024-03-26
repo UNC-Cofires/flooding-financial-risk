@@ -242,7 +242,7 @@ for year in np.arange(1999,2020):
     r15_marginals = {}
 
     for var in variables:
-        p30_marginals[var] = dm.empirical_distribution(r30[var].to_numpy())
+        p30_marginals[var] = dm.empirical_distribution(p30[var].to_numpy())
         r30_marginals[var] = dm.empirical_distribution(r30[var].to_numpy())
         r15_marginals[var] = dm.empirical_distribution(r15[var].to_numpy())
 

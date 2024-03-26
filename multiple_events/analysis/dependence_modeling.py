@@ -720,8 +720,8 @@ class empirical_distribution:
         if weights is None:
             weights = np.ones(len(x))
             
-        # Remove nans
-        mask = ~np.isnan(x)
+        # Remove nans and infinite values
+        mask = np.isfinite(x)
         x = x[mask]
         weights = weights[mask]
         
