@@ -994,7 +994,7 @@ class DependenceModel:
             
             print(f'*** Fitting dependence between {var1} and {var2} ***',flush=True)
             
-            mask = (~df[var1].isna())&(~df[var2].isna())
+            mask = np.isfinite(df[var1])&np.isfinite(df[var2])
             
             x1 = df[mask][var1].to_numpy()
             x2 = df[mask][var2].to_numpy()
