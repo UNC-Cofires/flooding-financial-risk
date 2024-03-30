@@ -84,7 +84,7 @@ county_folder = os.path.join(outfolder,county_name)
 if not os.path.exists(county_folder):
     os.makedirs(county_folder,exist_ok=True)
 
-print(f'#---------- {county_name} ----------#\n')
+print(f'#---------- {county_name} ----------#\n',flush=True)
 
 ### *** DAMAGE EXPOSURE DATA *** ###
 
@@ -376,14 +376,14 @@ originations = originations[~mask].reset_index(drop=True)
 
 n_drop = int(np.sum(mask))
 p_drop = n_drop/len(mask)
-print(f'Dropped {n_drop} / {len(mask)} ({np.round(p_drop*100,3)}%) loans due to poor characterization of key financial variables.\n')
+print(f'Dropped {n_drop} / {len(mask)} ({np.round(p_drop*100,3)}%) loans due to poor characterization of key financial variables.\n',flush=True)
 
 # Create a unique loan id for each origination consisting of county code and index of loan
 originations['loan_id'] = originations['countyCode'] + '-' + originations.index.values.astype(str)
 
 ### *** PERFORM DYNAMIC SIMULATION OF MORTGAGE BORROWER FINANCES WITHIN COUNTY *** ###
 
-print('Simulating borrower financial conditions over time.')
+print('Simulating borrower financial conditions over time.',flush=True)
 
 n_borrowers = len(originations)
 
