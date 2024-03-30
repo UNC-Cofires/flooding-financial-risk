@@ -898,7 +898,7 @@ class MultivariateGaussianCopula:
         R12 = self.R[unknown_cols,:][:,known_cols]
         R21 = R12.T
 
-        R22_inv = np.linalg.inv(R22)
+        R22_inv = np.linalg.pinv(R22,hermitian=True)
 
         mu = R12 @ R22_inv @ z_known
         sigma = R11 - R12 @ R22_inv @ R21
