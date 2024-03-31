@@ -1,5 +1,6 @@
 library(arrow)
 library(survival)
+library(dplyr)
 
 # Set up folders
 outfolder <- paste("/proj/characklab/flooddata/NC/multiple_events/analysis/",Sys.Date(),"_loan_survival_analysis",sep="")
@@ -11,9 +12,9 @@ performance_path = "/proj/characklab/flooddata/NC/multiple_events/financial_data
 usecols <- c("loan_id","loan_purpose","occupancy_status","loan_term","loan_age","prepayment","default","spread_vs_MORTGAGE30US","spread_vs_MORTGAGE15US")
 df <- read_parquet(performance_path,col_select=usecols)
 
-## (!) comment out once debugged
+# (!) comment out once debugged
 #loan_ids <- unique(df$loan_id)
-#selected_loans <- sample(loan_ids,100000)
+#selected_loans <- sample(loan_ids,250000)
 #df <- df[df$loan_id %in% selected_loans,]
 
 # Drop loans from non-primary residences
@@ -73,6 +74,20 @@ r15_surv_df$rate_spread_coeff <- r15_coxph$coefficients['rate_spread']
 r15_surv_df$rate_spread_coeff_lower <- confint(r15_coxph,level=0.95)[1]
 r15_surv_df$rate_spread_coeff_upper <- confint(r15_coxph,level=0.95)[2]
 
+# Also fit kaplan-meier so we can later copare to simulated borrower survival curves
+p30_km_data <- purchase30 %>% group_by(loan_id) %>% summarise(time1=min(time1),time2 = max(time2),prepayment=sum(prepayment,na.rm=TRUE))
+r30_km_data <- refinance30 %>% group_by(loan_id) %>% summarise(time1=min(time1),time2 = max(time2),prepayment=sum(prepayment,na.rm=TRUE))
+r15_km_data <- refinance15 %>% group_by(loan_id) %>% summarise(time1=min(time1),time2 = max(time2),prepayment=sum(prepayment,na.rm=TRUE))
+
+p30_km_surv <- survfit(Surv(time1,time2, prepayment) ~ 1, data=p30_km_data)
+r30_km_surv <- survfit(Surv(time1,time2, prepayment) ~ 1, data=r30_km_data)
+r15_km_surv <- survfit(Surv(time1,time2, prepayment) ~ 1, data=r15_km_data)
+
+# Convert to dataframe
+p30_km_surv_df <- with(p30_km_surv, data.frame(time, n.risk, n.event, surv, cumhaz, lower, upper))
+r30_km_surv_df <- with(r30_km_surv, data.frame(time, n.risk, n.event, surv, cumhaz, lower, upper))
+r15_km_surv_df <- with(r15_km_surv, data.frame(time, n.risk, n.event, surv, cumhaz, lower, upper))
+
 # Save results
 saveRDS(p30_coxph,file=paste(outfolder,"purchase30_coxph.rds",sep="/"))
 saveRDS(r30_coxph,file=paste(outfolder,"refinance30_coxph.rds",sep="/"))
@@ -82,6 +97,6 @@ write.csv(p30_surv_df,paste(outfolder,"purchase30_survival_params.csv",sep="/"),
 write.csv(r30_surv_df,paste(outfolder,"refinance30_survival_params.csv",sep="/"),row.names=FALSE)
 write.csv(r15_surv_df,paste(outfolder,"refinance15_survival_params.csv",sep="/"),row.names=FALSE)
 
-
-
-
+write.csv(p30_km_surv_df,paste(outfolder,"purchase30_km_estimate.csv",sep="/"),row.names=FALSE)
+write.csv(r30_km_surv_df,paste(outfolder,"refinance30_km_estimate.csv",sep="/"),row.names=FALSE)
+write.csv(r15_km_surv_df,paste(outfolder,"refinance15_km_estimate.csv",sep="/"),row.names=FALSE)
