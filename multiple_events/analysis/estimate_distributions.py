@@ -226,7 +226,7 @@ refinance15['rate_spread'] = refinance15['spread_vs_MORTGAGE15US']
 # Model joint distribution of income, loan amount, LTV, DTI, and rate spread using empirical marginals + guassian copula
 # Assume that the dependence between these variables doesn't vary within the state
 # (i.e., LTV and rate spread are just as correlated in Raleigh as they are in New Bern)
-variables = ['income','loan_amount','oLTV','oDTI','rate_spread']
+variables = ['income','loan_amount','oLTV','oDTI','credit_score','rate_spread']
 
 # Stratify joint distributions by year and loan type
 statelevel_distributions_by_year = {}
