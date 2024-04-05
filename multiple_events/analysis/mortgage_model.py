@@ -388,7 +388,6 @@ class MortgageBorrower:
                 if funding_gap > 0:
                     
                     default = 1
-                    self.mortgage_default[period] = 1
                     
                 else:
                                         
