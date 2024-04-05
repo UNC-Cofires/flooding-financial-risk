@@ -107,13 +107,123 @@ class home_repair_loan:
         next_month_interest = monthly_interest(self.interest_rate,self.unpaid_balance)
         self.monthly_payment = np.ceil(min(self.unpaid_balance + next_month_interest,self.monthly_payment)*100)/100
 
-class mortgage_borrower:
+class RecoveryFundingDecisionTree:
+    """
+    This submodel simulates the response of homeowners to 
+    """
+    
+    def __init__(self,
+                 sba_approval_prob,
+                 ihp_fraction_of_damage_dist,
+                 ihp_fraction_of_limit_dist,
+                 max_LTV_private=1.0,
+                 max_DTI_private=0.5,
+                 months_savings=1):
+        
+        """
+        param: sba_approval_prob: function returning probability of being approved for an SBA loan given credit score and DTI
+        param: ihp_fraction_of_damage_dist: distribution of % of damage covered by IHP aid among those with damage <= limit
+        param: ihp_fraction_of_limit_dist: distribution of % of IHP aid limit paid out among those with damage > limit
+        param: max_LTV_private: highest LTV ratio for which a borrower can be approved for a private home repair loan
+        param: max_DTI_private: highest DTI ratio for which a borrower can be approved for a private home repair loan
+        param: months_savings: number of months of gross income saved in emergency fund
+        """
+        
+        self.sba_approval_prob = sba_approval_prob
+        self.ihp_fraction_of_damage_dist = ihp_fraction_of_damage_dist
+        self.ihp_fraction_of_limit_dist = ihp_fraction_of_limit_dist
+        self.max_LTV_private = 1.0
+        self.max_DTI_private = 0.5
+        self.months_savings = months_savings
+        
+        
+    def roll_for_funding(self,
+                         funding_gap,
+                         monthly_income,
+                         property_value,
+                         credit_score,
+                         unpaid_balance_on_all_loans,
+                         total_monthly_debt_obligations,
+                         sba_repair_rate,
+                         private_repair_rate,
+                         max_ihp_grant):
+        """
+        In response to uninsured damage, borrowers will attempt to access different funding sources for disaster recovery.
+        The probability of success will depend on both the amount of damage and their pre-flood financial profile. 
+        
+        param: funding_gap: dollar amount of funds needed for repairs and recovery
+        param: monthly_income: borrower monthly income
+        param: propety_value: current value of property
+        param: unpaid_balance_on_all_loans: total unpaid balance of loans on property
+        param: total_monthly_debt_obligations: total monthly debt obligations of borrower
+        param: sba_repair_rate: interest rate on SBA home repair loans
+        param: private_repair_rate: interest rate on private home repair loans
+        param: max_ihp_grant: maximum FEMA IHP assistance grant amount
+        """
+        
+        sba_loan_amount = 0
+        ihp_grant_amount = 0
+        private_loan_amount = 0
+        savings_amount = 0
+        
+        private_LTV = np.nan
+        private_DTI = np.nan
+                
+        # Compute the probability of being approved for an SBA loan based on credit score and DTI
+        sba_payment = monthly_payment(sba_repair_rate,360,funding_gap)
+        sba_DTI = (total_monthly_debt_obligations + sba_payment) / monthly_income
+        sba_prob = self.sba_approval_prob(credit_score,sba_DTI)
+        
+        # Roll for SBA loan approval
+        
+        if np.random.binomial(1,sba_prob):
+            
+            sba_loan_amount = funding_gap
+            funding_gap = 0
+            
+        else:
+            
+            # If denied an SBA loan, roll for FEMA IHP
+            
+            if funding_gap <= max_ihp_grant:
+                ihp_grant_amount = funding_gap*self.ihp_fraction_of_damage_dist.rvs()[0]
+            else:
+                ihp_grant_amount = max_ihp_grant*self.ihp_fraction_of_limit_dist.rvs()[0]
+                
+            # Round up to nearest cent
+            ihp_grant_amount = np.ceil(ihp_grant_amount*100)/100
+            
+            # Subtract FEMA home repair grant amount from funding gap
+            funding_gap = max(funding_gap - ihp_grant_amount,0)
+            
+            # If funding gap remains, attempt to secure private loan, borrowing against equity in home
+            if funding_gap > 0:
+                
+                private_payment = monthly_payment(private_repair_rate,360,funding_gap)
+                private_DTI = (total_monthly_debt_obligations + private_payment) / monthly_income
+                private_LTV = (unpaid_balance_on_all_loans + funding_gap) / property_value
+                
+                if (private_DTI <= self.max_DTI_private) and (private_LTV <= self.max_LTV_private):
+                    
+                    private_loan_amount = funding_gap
+                    funding_gap = 0
+                    
+                else:
+                    # If not approved for private loan, turn to savings as a last resort
+                    emergency_fund = self.months_savings*monthly_income
+                    savings_amount = min(emergency_fund,funding_gap)
+                    funding_gap -= savings_amount
+        
+        return(sba_loan_amount,ihp_grant_amount,private_loan_amount,savings_amount,funding_gap)
+        
+        
+class MortgageBorrower:
     
     """
     This class simulates the financial conditions of a residential mortgage borrower subject to flood damage exposure. 
     """
     
-    def __init__(self,loan_id,building_id,origination_period,loan_purpose,loan_amount,loan_term,interest_rate,income,DTI):
+    def __init__(self,loan_id,building_id,origination_period,loan_purpose,loan_amount,loan_term,interest_rate,income,DTI,credit_score):
         """
         param: loan_id: unique identifier used to distinguish between mortgage loans 
         param: building_id: unique identifier tying mortgage to a specific property
@@ -124,10 +234,12 @@ class mortgage_borrower:
         param: interest_rate: interest_rate on loan
         param: income: annual income of borrower at origination
         param: DTI: debt-to-income ratio of borrower at origination
+        param: credit_score: borrower credit score on 300-850 scale. 
         """
         self.loan_id = loan_id
         self.building_id = building_id
         self.origination_period = origination_period
+        self.credit_score = credit_score
         self.loan_purpose = loan_purpose
         self.loan_amount = loan_amount
         self.loan_term = loan_term
@@ -136,17 +248,22 @@ class mortgage_borrower:
         self.monthly_income_at_origination = income/12
         self.other_monthly_debt_payments = self.monthly_income_at_origination*DTI - self.monthly_mortgage_payment
         
-    def initialize_state_variables(self,property_value,market_rate,repair_rate,income_growth,property_damage_exposure,end_period=None):
+    def initialize_state_variables(self,property_value,market_rate,private_repair_rate,sba_repair_rate,ihp_limit,income_growth,property_damage_exposure,RFDT,end_period=None):
         """
         Create time-dependent state variables describing borrower financial conditions.  
         
         param: property_value: pandas series of property value estimates indexed by period
         param: market_rate: pandas series of market mortgage rate estimates indexed by period
-        param: repair_rate: pandas series of interest rates on home repair / disaster recovery loans indexed by period
+        param: private_repair_rate: pandas series of interest rates on private home repair loans indexed by period
+        param: sba_repair_rate: pandas series of interest rates on SBA home repair loans indexed by period
+        param: ihp_limit: maximum FEMA home repair grant amount indexed by period
         param: income_growth: pandas series of monthly income growth rate indexed by period
         param: property_damage_exposure: pandas dataframe of flood damage costs indexed by period
+        param: RFDT: Instance of RecoveryFundingDecisionTree class. Used to allocate sources of disaster recovery funding. 
         param: end_period: period beyond which to stop simulation. if none, defaults to period at end of loan term. 
         """
+        
+        self.RFDT = RFDT
         
         if end_period is None:
             end_period = self.origination_period + pd.offsets.MonthEnd(self.loan_term-1)
@@ -157,8 +274,10 @@ class mortgage_borrower:
         self.loan_age = pd.Series(np.arange(n_periods),index=self.periods)
         self.property_value = property_value[self.periods]
         self.market_rate = market_rate[self.periods]
-        self.repair_rate = repair_rate[self.periods]
         self.rate_spread = self.interest_rate - self.market_rate
+        self.private_repair_rate = private_repair_rate[self.periods]
+        self.sba_repair_rate = sba_repair_rate[self.periods]
+        self.ihp_limit = ihp_limit[self.periods]
         self.insured_damage = property_damage_exposure['insured_nominal_cost'][self.periods]
         self.uninsured_damage = property_damage_exposure['uninsured_nominal_cost'][self.periods]
         
@@ -183,6 +302,14 @@ class mortgage_borrower:
         
         self.DTI = pd.Series(np.ones(n_periods)*np.nan,index=self.periods)
         self.DTI_excluding_repair_loans = pd.Series(np.ones(n_periods)*np.nan,index=self.periods)
+        
+        self.sba_loan_recovery_amount = pd.Series(np.zeros(n_periods),index=self.periods)
+        self.ihp_grant_recovery_amount = pd.Series(np.zeros(n_periods),index=self.periods)
+        self.private_loan_recovery_amount = pd.Series(np.zeros(n_periods),index=self.periods)
+        self.savings_recovery_amount = pd.Series(np.zeros(n_periods),index=self.periods)
+        self.recovery_funding_gap = pd.Series(np.zeros(n_periods),index=self.periods)
+        
+        self.termination_code = pd.Series(n_periods*[pd.NA],dtype='string',index=self.periods)
         
     def simulate_repayment(self,monthly_prepayment_prob,LTV_cutoff=1.0):
         """
@@ -220,16 +347,56 @@ class mortgage_borrower:
             self.DTI[period] = self.total_monthly_debt_obligations[period] / self.monthly_income[period]
             self.DTI_excluding_repair_loans[period] = (self.monthly_mortgage_payment + self.other_monthly_debt_payments) / self.monthly_income[period]
             
-            # If exposed to uninsured property damage during month, create a new home repair loan
-            if self.uninsured_damage[period] > 0:
-                self.repair_loans.append(home_repair_loan(self.uninsured_damage[period],360,self.repair_rate[period]))
             
             # If LTV is below cutoff, roll for probability of prepayment
-            if self.LTV[period] <= LTV_cutoff:
+            if (self.LTV[period] <= LTV_cutoff):
                 p = monthly_prepayment_prob(self.loan_age[period],self.rate_spread[period])
                 prepay = np.random.binomial(1,p)
             else:
                 prepay = 0
+                
+            # If exposed to uninsured property damage during month, create a new home repair loan
+            
+            default = 0 # Only modeling disaster-related defaults currently
+            
+            if self.uninsured_damage[period] > 0:
+                
+                # De-prioritize prepayment
+                prepay = 0
+                
+                # Roll for sources of post-disaster recovery funding
+                funding_sources = self.RFDT.roll_for_funding(self.uninsured_damage[period],
+                                                             self.monthly_income[period],
+                                                             self.property_value[period],
+                                                             self.credit_score,
+                                                             self.unpaid_balance_on_all_loans[period],
+                                                             self.total_monthly_debt_obligations[period],
+                                                             self.sba_repair_rate[period],
+                                                             self.private_repair_rate[period],
+                                                             self.ihp_limit[period])
+                
+                sba_loan_amount,ihp_grant_amount,private_loan_amount,savings_amount,funding_gap = funding_sources
+                
+                self.sba_loan_recovery_amount[period] = sba_loan_amount
+                self.ihp_grant_recovery_amount[period] = ihp_grant_amount
+                self.private_loan_recovery_amount[period] = private_loan_amount
+                self.savings_recovery_amount[period] = savings_amount
+                self.recovery_funding_gap[period] = funding_gap
+                
+                # If a funding gap remains, assume the homeowner defaults
+                
+                if funding_gap > 0:
+                    
+                    default = 1
+                    self.mortgage_default[period] = 1
+                    
+                else:
+                                        
+                    # Add SBA and private home repair loans to debt obligations 
+                    if sba_loan_amount > 0:
+                        self.repair_loans.append(home_repair_loan(sba_loan_amount,360,self.sba_repair_rate[period]))
+                    if private_loan_amount > 0:
+                        self.repair_loans.append(home_repair_loan(private_loan_amount,360,self.private_repair_rate[period]))
             
             # At end of month, update loan balances
             next_period = period + pd.offsets.MonthEnd(1)
@@ -249,13 +416,19 @@ class mortgage_borrower:
             # Update unpaid balance at end of month to reflect interest + monthly payment
             next_period_balance = max(self.unpaid_mortgage_balance[period] + interest - payment,0)
             
-            if (next_period_balance > 0) and (period != end_period):
+            if (next_period_balance > 0) and (period != end_period) and not default:
                 self.unpaid_mortgage_balance[next_period] = next_period_balance
-            elif (next_period_balance == 0):
-                self.zero_balance_date = period
+            elif (next_period_balance == 0) or default:
+                self.termination_date = period
+                
+                if default:
+                    self.termination_code[period] = 'D'
+                else:
+                    self.termination_code[period] = 'P'
+                    
                 break
             else:
-                self.zero_balance_date = pd.NaT
+                self.termination_date = pd.NaT
                 break
             
     def summarize(self):
@@ -263,9 +436,9 @@ class mortgage_borrower:
         Return a monthly summary of borrower financial conditions
         """
             
-        if self.zero_balance_date < self.periods[-1]:
+        if self.termination_date < self.periods[-1]:
             
-            self.periods = self.periods[self.periods <= self.zero_balance_date]
+            self.periods = self.periods[self.periods <= self.termination_date]
             
         summary = pd.DataFrame(data={'period':self.periods})
         summary['date'] = summary['period'].dt.start_time
@@ -273,6 +446,7 @@ class mortgage_borrower:
         # Add time-invariant borrower characteristics 
         summary['loan_id'] = self.loan_id
         summary['building_id'] = self.building_id
+        summary['credit_score'] = self.credit_score
         summary['loan_purpose'] = self.loan_purpose
         summary['loan_term'] = self.loan_term
         summary['interest_rate'] = self.interest_rate
@@ -281,12 +455,11 @@ class mortgage_borrower:
         summary.set_index('period',inplace=True)
         
         # Add time-varying borrower characteristics
+        summary['market_rate'] = self.market_rate[self.periods]
         summary['loan_age'] = self.loan_age[self.periods]
         summary['insured_damage'] = self.insured_damage[self.periods]
         summary['uninsured_damage'] = self.uninsured_damage[self.periods]
         summary['number_of_repair_loans'] = self.number_of_repair_loans[self.periods]
-        summary['market_rate'] = self.market_rate[self.periods]
-        summary['repair_rate'] = self.repair_rate[self.periods]
         summary['unpaid_mortgage_balance'] = self.unpaid_mortgage_balance[self.periods]
         summary['unpaid_repair_loan_balance'] = self.unpaid_repair_loan_balance[self.periods]
         summary['unpaid_balance_on_all_loans'] = self.unpaid_balance_on_all_loans[self.periods]
@@ -301,6 +474,14 @@ class mortgage_borrower:
         summary['DTI'] = self.DTI[self.periods]
         summary['LTV_excluding_repair_loans'] = self.LTV_excluding_repair_loans[self.periods]
         summary['DTI_excluding_repair_loans'] = self.DTI_excluding_repair_loans[self.periods]
+        
+        summary['sba_loan_recovery_amount'] = self.sba_loan_recovery_amount[self.periods]
+        summary['ihp_grant_recovery_amount'] = self.ihp_grant_recovery_amount[self.periods]
+        summary['private_loan_recovery_amount'] = self.private_loan_recovery_amount[self.periods]
+        summary['savings_recovery_amount'] = self.savings_recovery_amount[self.periods]
+        summary['recovery_funding_gap'] = self.recovery_funding_gap[self.periods]
+        
+        summary['termination_code'] = self.termination_code[self.periods]
         
         summary.reset_index(inplace=True)
         

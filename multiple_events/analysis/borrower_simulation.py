@@ -40,6 +40,27 @@ def format_elapsed_time(seconds):
     seconds = seconds - minutes*60
     return(f'{hours}h:{minutes:02d}m:{seconds:02d}s')
 
+def string_to_interval(s):
+    """
+    Convert string representation of interval to pandas interval type
+    """
+    
+    closed_right = s.endswith(']')
+    closed_left = s.startswith('[')
+
+    if closed_right and not closed_left:
+        closed = 'right'
+    elif not closed_right and closed_left:
+        closed = 'left'
+    elif not closed_right and not closed_left:
+        closed = 'neither'
+    else:
+        closed = 'both'
+
+    left,right = pd.to_numeric(s.strip('[]()').split(','))
+
+    return pd.Interval(left,right,closed=closed)
+
 ### *** SET UP FOLDERS AND ENVIRONMENT *** ###
 
 # Get index of county to simulate
@@ -84,7 +105,7 @@ county_folder = os.path.join(outfolder,county_name)
 if not os.path.exists(county_folder):
     os.makedirs(county_folder,exist_ok=True)
 
-print(f'#---------- {county_name} ----------#\n',flush=True)
+print(f'#---------- {county_name} ----------#\n')
 
 ### *** DAMAGE EXPOSURE DATA *** ###
 
@@ -153,7 +174,7 @@ pv_timeseries['period'] = pd.to_datetime(pv_timeseries['period']).dt.to_period('
 ### *** MORTGAGE ORIGINATION DATA *** ###
 
 # Read in data on mortgage originations
-originations_dir = os.path.join(pwd,'2024-03-26_distributions')
+originations_dir = os.path.join(pwd,'2024-04-01_distributions')
 originations_path = os.path.join(originations_dir,'hmda_mortgage_originations.csv')
 originations = pd.read_csv(originations_path,index_col=0,dtype={'county_code':str,'census_tract':str})
 originations = originations.rename(columns={'census_tract':'censusTract','county_code':'countyCode','census_year':'censusYear'})
@@ -180,7 +201,7 @@ with open(os.path.join(originations_dir,'statelevel_distributions_by_year.object
 ### *** MORTGAGE REPAYMENT DATA *** ###
 
 # Read in data on time to mortgage prepayment
-survival_dir = os.path.join(pwd,'2024-03-26_loan_survival_analysis')
+survival_dir = os.path.join(pwd,'2024-03-31_loan_survival_analysis')
 p30_path = os.path.join(survival_dir,'purchase30_survival_params.csv')
 r30_path = os.path.join(survival_dir,'refinance30_survival_params.csv')
 r15_path = os.path.join(survival_dir,'refinance15_survival_params.csv')
@@ -305,6 +326,71 @@ income_growth = income_df.set_index('period')['per_capita_income']
 # Convert to a growth rate (i.e., monthly % change in income)
 income_growth = (income_growth.shift(-1)/income_growth).ffill() - 1
 
+### *** SBA LOAN APPROVAL RATE DATA *** ###
+
+# Read in data on SBA loan approval rates binned by applicant credit score and DTI. 
+# Approval rate data was extracted from Figure 11 of Ellis & Collier (2019). 
+# https://appam.confex.com/data/extendedabstract/appam/2019/Paper_32641_extendedabstract_1913_0.pdf
+
+sba_filepath = '/proj/characklab/flooddata/NC/multiple_events/financial_data/HMDA/sba_approval_rate_by_credit_score_DTI.csv'
+sba_df = pd.read_csv(sba_filepath)
+
+sba_df['credit_score_bin'] = sba_df['credit_score_bin'].apply(string_to_interval)
+sba_df['DTI_bin'] = sba_df['DTI_bin'].apply(string_to_interval)
+
+# Using binned approval rate data, create a function that computes the approval rate given 
+# credit score and DTI. We'll accomplish this using nearest-neighbor interpolation. 
+
+smallnum = 1e-6
+
+credit_score_vals = []
+DTI_vals = []
+approval_rate_vals = []
+
+# Create "hard" points from 2D bin corners that we'll past to scipy's interpolation function
+# If the edge of an interval is closed, subtract a tiny number
+
+for row in sba_df.to_dict(orient='records'):
+    
+    L1 = row['credit_score_bin'].left + smallnum*int(row['credit_score_bin'].open_left)
+    R1 = row['credit_score_bin'].right - smallnum*int(row['credit_score_bin'].open_right)
+    L2 = row['DTI_bin'].left + smallnum*int(row['DTI_bin'].open_left)
+    R2 = row['DTI_bin'].right - smallnum*int(row['DTI_bin'].open_right)
+    p = row['approval_rate']
+    
+    credit_score_vals += [R1,R1,L1,L1]
+    DTI_vals += [L2,R2,L2,R2]
+    approval_rate_vals += 4*[p]
+    
+n_points = len(credit_score_vals)
+points = np.zeros((n_points,2))
+
+points[:,0] = np.array(credit_score_vals)
+points[:,1] = np.array(DTI_vals)
+
+sba_approval_prob_func = interp.NearestNDInterpolator(points,np.array(approval_rate_vals))
+
+### *** FEMA HOUSING ASSISTANCE GRANT DATA *** ###
+
+ihp_dir = '/proj/characklab/flooddata/NC/multiple_events/geospatial_data/OpenFEMA/IHP'
+
+# Get maximum FEMA housing assistance grant amount for each period of simulation
+ihp_limit_path = os.path.join(ihp_dir,'FEMA_housing_assistance_limit_by_year.csv')
+ihp_limit_by_year = pd.read_csv(ihp_limit_path).set_index('year')['ha_limit']
+ihp_limit = ihp_limit_by_year[periods.to_timestamp().year]
+ihp_limit.index = periods
+
+# Get distribution of FEMA housing assistance grant amounts
+## For those with damage <= limit, use distribution of % of damage covered
+## For those with damage > limit, use distribution of % of limit paid out
+
+# Read in data on joint distribution of LTV, DTI, etc. at origination by year
+with open(os.path.join(ihp_dir,'Normalized_FEMA_IHP_payout_distributions.object'), 'rb') as f:
+    ihp_amount_dict = pickle.load(f)
+
+ihp_fraction_of_damage_dist = ihp_amount_dict['fraction_of_damage']
+ihp_fraction_of_limit_dist = ihp_amount_dict['fraction_of_limit']
+
 # *** SPECIFY JOINT DISTRIBUTIONS FOR PRE-1999 PERIOD *** ###
 
 # GSE dataset has granular loan-level information by state going back to 1999
@@ -376,14 +462,22 @@ originations = originations[~mask].reset_index(drop=True)
 
 n_drop = int(np.sum(mask))
 p_drop = n_drop/len(mask)
-print(f'Dropped {n_drop} / {len(mask)} ({np.round(p_drop*100,3)}%) loans due to poor characterization of key financial variables.\n',flush=True)
+print(f'Dropped {n_drop} / {len(mask)} ({np.round(p_drop*100,3)}%) loans due to poor characterization of key financial variables.\n')
 
 # Create a unique loan id for each origination consisting of county code and index of loan
 originations['loan_id'] = originations['countyCode'] + '-' + originations.index.values.astype(str)
 
 ### *** PERFORM DYNAMIC SIMULATION OF MORTGAGE BORROWER FINANCES WITHIN COUNTY *** ###
 
-print('Simulating borrower financial conditions over time.',flush=True)
+# Initialize a decision tree that will be used to allocate funding sources for disaster recovery
+RFDT = mm.RecoveryFundingDecisionTree(sba_approval_prob_func,ihp_fraction_of_damage_dist,ihp_fraction_of_limit_dist)
+
+# Specify interest rates on 30-year home repair loans from private lenders / SBA
+# Assume that SBA loans charge 50% of the private interest rate
+private_repair_rate = market_rates[f'MORTGAGE30US']
+sba_repair_rate = 0.5*private_repair_rate
+
+print('Simulating borrower financial conditions over time.')
 
 n_borrowers = len(originations)
 
@@ -433,16 +527,12 @@ for i,origination in enumerate(originations.to_dict(orient='records')):
     loan_years = int(loan_term/12)
     market_rate = market_rates[f'MORTGAGE{loan_years}US']
 
-    # Specify interest rates on 30-year home repair / disaster recovery loans
-    # Assume that borrowers pay 50% of the market rate, since this roughly follows the SBA's below-market rate
-    # (Note that we're being pretty generous here by assuming that everyone gets approved and receives the below-market rate)
-    repair_rate = 0.5*market_rates[f'MORTGAGE30US']
-
     # Select appropriate monthly prepayment hazard function
     monthly_prepayment_prob = prepayment_profiles[f'{loan_purpose}{loan_years}']
 
-    # Simulate DTI and rate spread at origination conditional on loan amount and income
-    known_values = np.array([[income,loan_amount,np.nan,np.nan,np.nan]])
+    # Simulate DTI, credit score, and rate spread at origination conditional on loan amount and income
+    
+    known_values = np.array([[income,loan_amount,np.nan,np.nan,np.nan,np.nan]])
     depmod = jointdist_by_year[origination_year][f'{loan_purpose}{loan_years}']
 
     # Because we simulate DTI and interest rate from a guassian copula, it is 
@@ -455,15 +545,16 @@ for i,origination in enumerate(originations.to_dict(orient='records')):
     n_draws = 0
 
     while keepgoing:
-
-        income,loan_amount,extra,oDTI,rate_spread = depmod.conditional_simulation(known_values)[0]
+        
+        drawn_values = depmod.conditional_simulation(known_values)[0]
+        income,loan_amount,extra,oDTI,credit_score,rate_spread = drawn_values
         interest_rate = market_rate[origination_period] + rate_spread
         monthly_payment = mm.monthly_payment(interest_rate,loan_term,loan_amount)
         monthly_income = income/12
 
         n_draws += 1
 
-        if monthly_payment/monthly_income <= oDTI:
+        if (monthly_payment/monthly_income <= oDTI) and not np.isnan(drawn_values).any():
             keepgoing = False
             success = True
         elif n_draws >= 10:
@@ -489,7 +580,6 @@ for i,origination in enumerate(originations.to_dict(orient='records')):
         # Calculate probability mass associated with potential properties (which differ in terms of LTV at origination) 
         potential_property_values['prob'] = depmod.marginals['oLTV'].pdf(potential_property_values['oLTV'].to_numpy())
         potential_property_values['prob'] = potential_property_values['prob']/potential_property_values['prob'].sum()
-        potential_property_values['prob'] = np.minimum(np.maximum(potential_property_values['prob'].fillna(0),0),1)
 
         # Randomly select property according to probability mass
         building_id = np.random.choice(potential_property_values['building_id'].to_numpy(),p=potential_property_values['prob'].to_numpy())
@@ -497,8 +587,8 @@ for i,origination in enumerate(originations.to_dict(orient='records')):
         property_damage_exposure = damage_exposure[damage_exposure['building_id']==building_id].set_index('period').drop(columns='building_id')
 
         # Initialize borrower class and simulate repayment
-        B = mm.mortgage_borrower(loan_id,building_id,origination_period,loan_purpose,loan_amount,loan_term,interest_rate,income,oDTI)
-        B.initialize_state_variables(property_value,market_rate,repair_rate,income_growth,property_damage_exposure,end_period=end_period)
+        B = mm.MortgageBorrower(loan_id,building_id,origination_period,loan_purpose,loan_amount,loan_term,interest_rate,income,oDTI,credit_score)
+        B.initialize_state_variables(property_value,market_rate,private_repair_rate,sba_repair_rate,ihp_limit,income_growth,property_damage_exposure,RFDT,end_period=end_period)
         B.simulate_repayment(monthly_prepayment_prob)
         summary_list.append(B.summarize())
 
@@ -510,7 +600,8 @@ for i,origination in enumerate(originations.to_dict(orient='records')):
     else:
         failed_loans.append(loan_id)
         
-
+        
+        
 summary = pd.concat(summary_list).reset_index(drop=True)
 
 ### *** SAVE RESULTS *** ###
@@ -527,4 +618,3 @@ summary.to_parquet(outname)
 outname = os.path.join(county_folder,f'{county_name}_failed_loans.csv')
 failed_loan_df = pd.DataFrame({'loan_id':np.array(failed_loans)})
 failed_loan_df.to_csv(outname,index=False)
-
