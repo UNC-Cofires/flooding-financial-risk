@@ -79,7 +79,7 @@ def prepayment_hazard(t,S,beta=0,lam=1000,t_cutoff=360):
     
     return(hazard_rate,monthly_prob)
 
-class home_repair_loan:
+class HomeRepairLoan:
     """
     This class keeps track of the unpaid balance and monthly payment on a home repair loan. 
     """
@@ -109,7 +109,8 @@ class home_repair_loan:
 
 class RecoveryFundingDecisionTree:
     """
-    This submodel simulates the response of homeowners to 
+    This submodel stochastically allocates different sources of post-disaster recovery funding based on the amount of 
+    uninsured damage they sustained as well as their pre-flood financial characteristics. 
     """
     
     def __init__(self,
@@ -132,8 +133,8 @@ class RecoveryFundingDecisionTree:
         self.sba_approval_prob = sba_approval_prob
         self.ihp_fraction_of_damage_dist = ihp_fraction_of_damage_dist
         self.ihp_fraction_of_limit_dist = ihp_fraction_of_limit_dist
-        self.max_LTV_private = 1.0
-        self.max_DTI_private = 0.5
+        self.max_LTV_private = max_LTV_private
+        self.max_DTI_private = max_DTI_private
         self.months_savings = months_savings
         
         
@@ -165,9 +166,6 @@ class RecoveryFundingDecisionTree:
         ihp_grant_amount = 0
         private_loan_amount = 0
         savings_amount = 0
-        
-        private_LTV = np.nan
-        private_DTI = np.nan
                 
         # Compute the probability of being approved for an SBA loan based on credit score and DTI
         sba_payment = monthly_payment(sba_repair_rate,360,funding_gap)
@@ -393,9 +391,9 @@ class MortgageBorrower:
                                         
                     # Add SBA and private home repair loans to debt obligations 
                     if sba_loan_amount > 0:
-                        self.repair_loans.append(home_repair_loan(sba_loan_amount,360,self.sba_repair_rate[period]))
+                        self.repair_loans.append(HomeRepairLoan(sba_loan_amount,360,self.sba_repair_rate[period]))
                     if private_loan_amount > 0:
-                        self.repair_loans.append(home_repair_loan(private_loan_amount,360,self.private_repair_rate[period]))
+                        self.repair_loans.append(HomeRepairLoan(private_loan_amount,360,self.private_repair_rate[period]))
             
             # At end of month, update loan balances
             next_period = period + pd.offsets.MonthEnd(1)
