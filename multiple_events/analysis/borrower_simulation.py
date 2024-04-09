@@ -153,7 +153,7 @@ pv_timeseries['period'] = pd.to_datetime(pv_timeseries['period']).dt.to_period('
 ### *** MORTGAGE ORIGINATION DATA *** ###
 
 # Read in data on mortgage originations
-originations_dir = os.path.join(pwd,'2024-03-26_distributions')
+originations_dir = os.path.join(pwd,'2024-04-01_distributions')
 originations_path = os.path.join(originations_dir,'hmda_mortgage_originations.csv')
 originations = pd.read_csv(originations_path,index_col=0,dtype={'county_code':str,'census_tract':str})
 originations = originations.rename(columns={'census_tract':'censusTract','county_code':'countyCode','census_year':'censusYear'})
@@ -180,7 +180,7 @@ with open(os.path.join(originations_dir,'statelevel_distributions_by_year.object
 ### *** MORTGAGE REPAYMENT DATA *** ###
 
 # Read in data on time to mortgage prepayment
-survival_dir = os.path.join(pwd,'2024-03-26_loan_survival_analysis')
+survival_dir = os.path.join(pwd,'2024-03-31_loan_survival_analysis')
 p30_path = os.path.join(survival_dir,'purchase30_survival_params.csv')
 r30_path = os.path.join(survival_dir,'refinance30_survival_params.csv')
 r15_path = os.path.join(survival_dir,'refinance15_survival_params.csv')
@@ -267,6 +267,12 @@ average_spread_15y_vs_30y = (market_rates['MORTGAGE15US'] - market_rates['MORTGA
 m = market_rates['MORTGAGE15US'].isna()
 market_rates.loc[m,'MORTGAGE15US'] = market_rates.loc[m,'MORTGAGE30US'] + average_spread_15y_vs_30y
 market_rates = market_rates.set_index('period')
+
+# Specify interest rates on home repair loans / disaster recovery loans
+# In the base case, assume equal to the average 30-year fixed mortgage rate
+# In sensitivity analysis, assume equal to 50% of average 30-year fixed rate, since this approximates the SBA's below-market rate
+# Assume that borrowers pay 50% of the market rate, since this roughly follows the SBA's below-market rate
+repair_rate = market_rates[f'MORTGAGE30US']
 
 ### *** INCOME GROWTH DATA *** ###
 
@@ -433,16 +439,11 @@ for i,origination in enumerate(originations.to_dict(orient='records')):
     loan_years = int(loan_term/12)
     market_rate = market_rates[f'MORTGAGE{loan_years}US']
 
-    # Specify interest rates on 30-year home repair / disaster recovery loans
-    # Assume that borrowers pay 50% of the market rate, since this roughly follows the SBA's below-market rate
-    # (Note that we're being pretty generous here by assuming that everyone gets approved and receives the below-market rate)
-    repair_rate = 0.5*market_rates[f'MORTGAGE30US']
-
     # Select appropriate monthly prepayment hazard function
     monthly_prepayment_prob = prepayment_profiles[f'{loan_purpose}{loan_years}']
 
     # Simulate DTI and rate spread at origination conditional on loan amount and income
-    known_values = np.array([[income,loan_amount,np.nan,np.nan,np.nan]])
+    known_values = np.array([[income,loan_amount,np.nan,np.nan,np.nan,np.nan]])
     depmod = jointdist_by_year[origination_year][f'{loan_purpose}{loan_years}']
 
     # Because we simulate DTI and interest rate from a guassian copula, it is 
@@ -456,7 +457,7 @@ for i,origination in enumerate(originations.to_dict(orient='records')):
 
     while keepgoing:
 
-        income,loan_amount,extra,oDTI,rate_spread = depmod.conditional_simulation(known_values)[0]
+        income,loan_amount,extra,oDTI,credit_score,rate_spread = depmod.conditional_simulation(known_values)[0]
         interest_rate = market_rate[origination_period] + rate_spread
         monthly_payment = mm.monthly_payment(interest_rate,loan_term,loan_amount)
         monthly_income = income/12
@@ -497,7 +498,7 @@ for i,origination in enumerate(originations.to_dict(orient='records')):
         property_damage_exposure = damage_exposure[damage_exposure['building_id']==building_id].set_index('period').drop(columns='building_id')
 
         # Initialize borrower class and simulate repayment
-        B = mm.mortgage_borrower(loan_id,building_id,origination_period,loan_purpose,loan_amount,loan_term,interest_rate,income,oDTI)
+        B = mm.MortgageBorrower(loan_id,building_id,origination_period,loan_purpose,loan_amount,loan_term,interest_rate,income,oDTI,credit_score)
         B.initialize_state_variables(property_value,market_rate,repair_rate,income_growth,property_damage_exposure,end_period=end_period)
         B.simulate_repayment(monthly_prepayment_prob)
         summary_list.append(B.summarize())
@@ -527,4 +528,3 @@ summary.to_parquet(outname)
 outname = os.path.join(county_folder,f'{county_name}_failed_loans.csv')
 failed_loan_df = pd.DataFrame({'loan_id':np.array(failed_loans)})
 failed_loan_df.to_csv(outname,index=False)
-

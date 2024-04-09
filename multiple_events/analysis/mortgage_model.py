@@ -79,7 +79,7 @@ def prepayment_hazard(t,S,beta=0,lam=1000,t_cutoff=360):
     
     return(hazard_rate,monthly_prob)
 
-class home_repair_loan:
+class HomeRepairLoan:
     """
     This class keeps track of the unpaid balance and monthly payment on a home repair loan. 
     """
@@ -107,13 +107,13 @@ class home_repair_loan:
         next_month_interest = monthly_interest(self.interest_rate,self.unpaid_balance)
         self.monthly_payment = np.ceil(min(self.unpaid_balance + next_month_interest,self.monthly_payment)*100)/100
 
-class mortgage_borrower:
+class MortgageBorrower:
     
     """
     This class simulates the financial conditions of a residential mortgage borrower subject to flood damage exposure. 
     """
     
-    def __init__(self,loan_id,building_id,origination_period,loan_purpose,loan_amount,loan_term,interest_rate,income,DTI):
+    def __init__(self,loan_id,building_id,origination_period,loan_purpose,loan_amount,loan_term,interest_rate,income,DTI,credit_score):
         """
         param: loan_id: unique identifier used to distinguish between mortgage loans 
         param: building_id: unique identifier tying mortgage to a specific property
@@ -124,9 +124,11 @@ class mortgage_borrower:
         param: interest_rate: interest_rate on loan
         param: income: annual income of borrower at origination
         param: DTI: debt-to-income ratio of borrower at origination
+        param: credit_score: credit score of the borrower at origination
         """
         self.loan_id = loan_id
         self.building_id = building_id
+        self.credit_score = credit_score
         self.origination_period = origination_period
         self.loan_purpose = loan_purpose
         self.loan_amount = loan_amount
@@ -180,16 +182,22 @@ class mortgage_borrower:
         
         self.LTV = pd.Series(np.ones(n_periods)*np.nan,index=self.periods)
         self.LTV_excluding_repair_loans = pd.Series(np.ones(n_periods)*np.nan,index=self.periods)
+        self.aLTV = pd.Series(np.ones(n_periods)*np.nan,index=self.periods)
         
         self.DTI = pd.Series(np.ones(n_periods)*np.nan,index=self.periods)
         self.DTI_excluding_repair_loans = pd.Series(np.ones(n_periods)*np.nan,index=self.periods)
+        self.aDTI = pd.Series(np.ones(n_periods)*np.nan,index=self.periods)
         
-    def simulate_repayment(self,monthly_prepayment_prob,LTV_cutoff=1.0):
+        self.termination_code = pd.Series(n_periods*[pd.NA],dtype='string',index=self.periods)
+        
+    def simulate_repayment(self,monthly_prepayment_prob,LTV_cutoff=1.0,aLTV_cutoff=1.0,aDTI_cutoff=0.5):
         """
         Simulate borrower financial conditions over time until mortgage loan is repaid. 
         
         param: monthly_prepayment_prob: function returning monthly prepayment probability given loan age and rate spread
-        param: LTV_cutoff: maximum allowable LTV for a borrower to sell or refinance their home 
+        param: LTV_cutoff: maximum allowable LTV for a borrower to sell or refinance their home
+        param: aLTV_cutoff: if aLTV exceeds this threshold, assume the borrower cannot easily finance home repairs, and terminate the simulation.
+        param: aDTI_cutoff: if aDTI exceeds this threshold, assume the borrower cannot easily finance home repairs, and terminate the simulation.
         """
         
         self.repair_loans = []
@@ -198,7 +206,7 @@ class mortgage_borrower:
         end_period = self.periods[-1]
         
         for period in self.periods:
-                        
+                                    
             # Get unpaid balance and monthly payments on any prexisting home repair loans
             for i in range(len(self.repair_loans)):
                 self.unpaid_repair_loan_balance[period] += self.repair_loans[i].unpaid_balance
@@ -220,16 +228,31 @@ class mortgage_borrower:
             self.DTI[period] = self.total_monthly_debt_obligations[period] / self.monthly_income[period]
             self.DTI_excluding_repair_loans[period] = (self.monthly_mortgage_payment + self.other_monthly_debt_payments) / self.monthly_income[period]
             
-            # If exposed to uninsured property damage during month, create a new home repair loan
-            if self.uninsured_damage[period] > 0:
-                self.repair_loans.append(home_repair_loan(self.uninsured_damage[period],360,self.repair_rate[period]))
-            
             # If LTV is below cutoff, roll for probability of prepayment
             if self.LTV[period] <= LTV_cutoff:
                 p = monthly_prepayment_prob(self.loan_age[period],self.rate_spread[period])
                 prepay = np.random.binomial(1,p)
             else:
                 prepay = 0
+                
+            # Assess response to uninsured damage
+            terminate = 0
+            if self.uninsured_damage[period] > 0:
+                
+                # Prioritize home repairs over prepayment
+                prepay = 0
+                
+                # Calculate damage-adjusted LTV and DTI ratios based on a hypothetical home repair loan
+                repair_loan = HomeRepairLoan(self.uninsured_damage[period],360,self.repair_rate[period])
+                self.aLTV[period] = (self.unpaid_balance_on_all_loans[period] + repair_loan.unpaid_balance) / self.property_value[period]
+                self.aDTI[period] = (self.total_monthly_debt_obligations[period] + repair_loan.monthly_payment) / self.monthly_income[period]
+                
+                # Assume borrower is approved if they can support this loan without exceeding LTV and DTI cutoffs
+                # Otherwise, assume they can't easily finance repairs, and terminate the simulation
+                if (self.aLTV[period] <= aLTV_cutoff) and (self.aDTI[period] <= aDTI_cutoff):
+                    self.repair_loans.append(repair_loan)
+                else:
+                    terminate=1
             
             # At end of month, update loan balances
             next_period = period + pd.offsets.MonthEnd(1)
@@ -249,13 +272,18 @@ class mortgage_borrower:
             # Update unpaid balance at end of month to reflect interest + monthly payment
             next_period_balance = max(self.unpaid_mortgage_balance[period] + interest - payment,0)
             
-            if (next_period_balance > 0) and (period != end_period):
+            if (next_period_balance > 0) and (period != end_period) and not terminate:
                 self.unpaid_mortgage_balance[next_period] = next_period_balance
-            elif (next_period_balance == 0):
-                self.zero_balance_date = period
+            elif (next_period_balance == 0) or terminate:
+                self.termination_date = period
+                
+                if terminate:
+                    self.termination_code[period] = 'T'
+                else:
+                    self.termination_code[period] = 'P'
                 break
             else:
-                self.zero_balance_date = pd.NaT
+                self.termination_date = pd.NaT
                 break
             
     def summarize(self):
@@ -263,9 +291,9 @@ class mortgage_borrower:
         Return a monthly summary of borrower financial conditions
         """
             
-        if self.zero_balance_date < self.periods[-1]:
+        if self.termination_date < self.periods[-1]:
             
-            self.periods = self.periods[self.periods <= self.zero_balance_date]
+            self.periods = self.periods[self.periods <= self.termination_date]
             
         summary = pd.DataFrame(data={'period':self.periods})
         summary['date'] = summary['period'].dt.start_time
@@ -273,6 +301,7 @@ class mortgage_borrower:
         # Add time-invariant borrower characteristics 
         summary['loan_id'] = self.loan_id
         summary['building_id'] = self.building_id
+        summary['credit_score'] = self.credit_score
         summary['loan_purpose'] = self.loan_purpose
         summary['loan_term'] = self.loan_term
         summary['interest_rate'] = self.interest_rate
@@ -301,6 +330,10 @@ class mortgage_borrower:
         summary['DTI'] = self.DTI[self.periods]
         summary['LTV_excluding_repair_loans'] = self.LTV_excluding_repair_loans[self.periods]
         summary['DTI_excluding_repair_loans'] = self.DTI_excluding_repair_loans[self.periods]
+        summary['aLTV'] = self.aLTV[self.periods]
+        summary['aDTI'] = self.aDTI[self.periods]
+
+        summary['termination_code'] = self.termination_code[self.periods]
         
         summary.reset_index(inplace=True)
         
