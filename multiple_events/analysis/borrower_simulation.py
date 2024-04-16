@@ -491,6 +491,7 @@ for i,origination in enumerate(originations.to_dict(orient='records')):
         potential_property_values['prob'] = depmod.marginals['oLTV'].pdf(potential_property_values['oLTV'].to_numpy())
         potential_property_values['prob'] = potential_property_values['prob']/potential_property_values['prob'].sum()
         potential_property_values['prob'] = np.minimum(np.maximum(potential_property_values['prob'].fillna(0),0),1)
+        potential_property_values['prob'] = potential_property_values['prob']/potential_property_values['prob'].sum()
 
         # Randomly select property according to probability mass
         building_id = np.random.choice(potential_property_values['building_id'].to_numpy(),p=potential_property_values['prob'].to_numpy())
