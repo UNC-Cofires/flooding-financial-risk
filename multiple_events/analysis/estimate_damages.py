@@ -12,21 +12,6 @@ import floodprediction as fp
 # Specify number of available CPUs for parallel processing
 n_cores = int(os.environ['SLURM_NTASKS'])
 
-# Display values of environmental variables relevant to parallelization
-relevant_environment_vars = ['SLURM_NTASKS',
-                             'OMP_NUM_THREADS',
-                             'MKL_NUM_THREADS',
-                             'OPENBLAS_NUM_THREADS',
-                             'BLIS_NUM_THREADS',
-                             'VECLIB_MAXIMUM_THREADS',
-                             'NUMEXPR_NUM_THREADS']
-
-for environment_var in relevant_environment_vars:
-    try:
-        print(f'{environment_var}:',os.environ[environment_var],flush=True)
-    except:
-        pass
-
 # Specify current working directory
 pwd = os.getcwd()
 
@@ -63,6 +48,13 @@ claims['total_cost'] = claims['Net_Total_Payments']
 raster_values_path = '/proj/characklab/flooddata/NC/multiple_events/data_processing/rasters/raster_values_at_building_points.csv'
 raster_values = pd.read_csv(raster_values_path)
 buildings = pd.merge(buildings,raster_values,on='building_id',how='left')
+
+# Attach precipitation data sampled at building points
+precip_values_path = '/proj/characklab/flooddata/NC/multiple_events/data_processing/rasters/max_3day_precip_at_building_points.csv'
+precip_values = pd.read_csv(precip_values_path)
+precip_column = [x for x in precip_values.columns if event['name'] in x][0]
+precip_values = precip_values[['building_id',precip_column]]
+buildings = pd.merge(buildings,precip_values,on='building_id',how='left')
 
 # Rename SFHA columns (this will make it easier to match up with OpenFEMA later)
 buildings = buildings.rename(columns={'NC_SFHA_NoX_extend_10252022':'SFHA'})
@@ -240,12 +232,13 @@ if peak_date >= openfema_date:
 else:
     auxiliary_units = ZCTAs
     unit_name = 'reportedZipCode'
-
+    
 ### *** INITIALIZE FLOOD EVENT OBJECT *** ###
+
 floodevent = fp.FloodEvent(study_area,start_date,end_date,peak_date,crs,auxiliary_units)
 floodevent.preprocess_data(parcels,buildings,claims,policies)
 
-# Use OpenFEMA data to determine where policies are missing.
+# Use auxiliary data from OpenFEMA or EDF to determine where policies are missing.
 # Based on this information, generate pseudo-absences
 floodevent.preprocess_auxiliary(auxiliary_claims,auxiliary_policies,unit_name)
 floodevent.stratify_missing([unit_name,'SFHA'])
@@ -254,60 +247,48 @@ floodevent.crop_to_study_area()
 
 ### *** DEFINE FEATURES USED FOR FLOOD DAMAGE PREDICTION *** ###
 
-# Define features used to predict presence/absence of flood damage
-presence_response_variable = 'flood_damage'
-presence_features = ['SFHA',
-                     'NHDcoastline_DistRaster_500res_08222022',
-                     'NC_MajorHydro_DistRaster_500res_08292022',
-                     'HANDraster_MosaicR_IDW30_finalR_03032023',
-                     'TWIrasterHuc12_10262022',
-                     'soilsKsat_NC_03072023',
-                     'NEDavgslope_NCcrop_huc12_10262022',
-                     'NEDraster_resample_07042022',
-                     'NLCDimpraster_NC2016_07132022']
+
+# Define features used to predict presence/absence and cost of flood damage
+features = ['SFHA',
+            'YEAR_BUILT',
+            'BLDG_VALUE',
+            'HTD_SQ_FT',
+            'FFE',
+            precip_column,
+            'NHDcoastline_DistRaster_500res_08222022',
+            'NC_MajorHydro_DistRaster_500res_08292022',
+            'HANDraster_MosaicR_IDW30_finalR_03032023',
+            'TWIrasterHuc12_10262022',
+            'soilsKsat_NC_03072023',
+            'NEDavgslope_NCcrop_huc12_10262022',
+            'NEDraster_resample_07042022',
+            'NLCDimpraster_NC2016_07132022']
 
 huc_columns = [x for x in floodevent.training_dataset.columns if x.startswith('huc')]
-presence_features += huc_columns
-
-# Remove features that are uninformative or highly correlated with others
-presence_features = fp.remove_unnecessary_features(presence_features,floodevent.training_dataset,max_corr=0.7)
-
-# Define features used to predict cost of damage among flooded buildings
-cost_response_variable = 'total_cost'
-cost_features = ['SFHA',
-                 'YEAR_BUILT',
-                 'BLDG_VALUE',
-                 'HTD_SQ_FT',
-                 'FFE',
-                 'NHDcoastline_DistRaster_500res_08222022',
-                 'NC_MajorHydro_DistRaster_500res_08292022',
-                 'HANDraster_MosaicR_IDW30_finalR_03032023',
-                 'TWIrasterHuc12_10262022',
-                 'soilsKsat_NC_03072023',
-                 'NEDavgslope_NCcrop_huc12_10262022',
-                 'NEDraster_resample_07042022',
-                 'NLCDimpraster_NC2016_07132022']
-
-huc_columns = [x for x in floodevent.training_dataset.columns if x.startswith('huc')]
-cost_features += huc_columns
+features += huc_columns
 
 occup_columns = [x for x in floodevent.training_dataset.columns if x.startswith('OCCUP_TYPE')]
-cost_features += occup_columns
+features += occup_columns
 
 found_columns = [x for x in floodevent.training_dataset.columns if x.startswith('FOUND_TYPE')]
-cost_features += found_columns
+features += found_columns
 
-# Remove features that are uninformative or highly correlated with others
-cost_features = fp.remove_unnecessary_features(cost_features,floodevent.training_dataset,max_corr=0.7)
+# If two features are highly correlated, remove one
+features = fp.remove_unnecessary_features(features,floodevent.training_dataset,max_corr=0.8)
 
-### *** PERFORM CROSS VALIDATION *** ###
-floodevent.random_cross_validation(presence_response_variable,presence_features,cost_response_variable,cost_features,use_adjusted=True,k=10,n_cores=n_cores)
-floodevent.spatial_cross_validation(presence_response_variable,presence_features,cost_response_variable,cost_features,tiles,use_adjusted=True,max_k=500,n_cores=n_cores)
+# Define response variables used for 
+response_variable = 'total_cost'
 
-### *** PREDICT FLOOD DAMAGE AMONG UNINSURED *** ###
-floodevent.predict_flood_damage(presence_response_variable,presence_features,cost_response_variable,cost_features,use_adjusted=True,n_cores=n_cores)
+## *** PERFORM RANDOM CROSS VALIDATION *** ###
+floodevent.random_cross_validation(response_variable,features,use_adjusted=True,k=10,n_cores=n_cores)
 
-### *** SAVE RESULTS *** ###
+## *** PREDICT FLOOD DAMAGE AMONG UNINSURED *** ###
+floodevent.predict_flood_damage(response_variable,features,use_adjusted=True,n_cores=n_cores)
+
+## *** PERFORM SPATIAL CROSS VALIDATION *** ###
+floodevent.spatial_cross_validation(tiles,use_adjusted=True,max_k=500,n_cores=n_cores)
+
+## *** SAVE RESULTS *** ###
 with open(os.path.join(outfolder,f'{peak_date}_{event_name}_FloodEvent.object'),'wb') as f:
     pickle.dump(floodevent,f)
     f.close()

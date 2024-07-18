@@ -7,69 +7,297 @@ import sklearn.metrics as metrics
 from sklearn.ensemble import RandomForestRegressor,RandomForestClassifier
 from sklearn.model_selection import KFold,GridSearchCV
 from scipy.interpolate import interp1d
+import scipy.stats as stats
+from itertools import product
 import time
 
-# *** Class for performing Random Forest regression on arbitrary data ***
+def maximized_R2_threshold(pred_presence_prob,pred_cost_given_presence,true_cost):
+    """
+    Return the probability threshold that maximizes coefficient of determination (R2) for a zero-inflated model. 
+    
+    param: pred_presence_prob: predicted probability of flooding
+    param: pred_cost_given_presence: predicted damage cost conditional on flooding
+    param: true_cost: observed flood damage cost
+    """
+    
+    f = np.vectorize(lambda x: metrics.r2_score(true_cost, pred_cost_given_presence*(pred_presence_prob > x).astype(int)))
+    threshold_vals = np.linspace(0,1,101)
+    threshold = threshold_vals[np.argmax(f(threshold_vals))]
+    return(threshold)
 
-class RegressionObject:
+# *** Class for performing Random Forest regression on zero-inflated data (e.g., insurance claims) ***
 
-    def __init__(self,train_df,test_df,target_df,response_variable,features,n_cores=1,hyperparams={'max_depth':5}):
+class ZeroInflatedRandomForest:
+
+    def __init__(self,train_df,test_df,response_variable,features,presence_hyperparams=None,cost_hyperparams=None,n_cores=1):
         """
         param: train_df: pandas dataframe of training data (m x n+1)
         param: test_df: pandas dataframe of validation data (m x n+1)
-        param: target_df: pandas dataframe of target data (z x n)
-        param: response_variable: name of response variable
-        param: features: list of predictors (n)
+        param: response_variable: name of response variable denoting cost of flood damage
+        param: features: list of predictors used to predict presence and cost of flood damage 
+        param: presence_hyperparams: hyperparameters of presence/absence model
+        param: cost_hyperparams: hyperparameters of presence/absence model
         param: n_cores: number of threads to use for parallelization of model
-        param: hyperparams: hyperparameters passed to random forest model
         """
-        self.features = [f for f in features if f != response_variable and f != train_df.index.name]
+        
+        if presence_hyperparams is None:
+            presence_hyperparams = {'n_estimators':120,'max_features':0.5,'max_depth':6}
+        if cost_hyperparams is None:
+            cost_hyperparams = {'n_estimators':120,'max_features':0.5,'max_depth':6}
+            
         self.response_variable = response_variable
+        self.nonzero = (train_df[self.response_variable] > 0)
+        self.features = [f for f in features if f != response_variable and f != train_df.index.name]
         self.x = train_df[self.features].to_numpy()
-        self.y = train_df[self.response_variable].to_numpy()
+        self.y = train_df[self.response_variable].to_numpy()        
         self.x_test = test_df[self.features].to_numpy()
         self.y_test = test_df[self.response_variable].to_numpy()
-        self.x_target = target_df[self.features].to_numpy()
-        self.model = None
-        self.n_cores = n_cores
-        self.hyperparams = hyperparams
+        self.x_perm = self.x_test.copy()
+        self.presence_hyperparams = presence_hyperparams
+        self.presence_model = RandomForestRegressor(**self.presence_hyperparams,n_jobs=n_cores)
+        self.cost_hyperparams = cost_hyperparams
+        self.cost_model = RandomForestRegressor(**self.cost_hyperparams,n_jobs=n_cores)
+        
         return(None)
-
+            
     def model_fit(self):
         """
-        Fit a random forest regression model to the data
+        Fit a zero-inflated random forest regression model to the data
         """
-        self.model = RandomForestRegressor(**self.hyperparams,n_jobs=self.n_cores)
-        self.model.fit(self.x,self.y)
-
+        self.presence_model.fit(self.x,self.nonzero.astype(int))
+        self.cost_model.fit(self.x[self.nonzero,:],self.y[self.nonzero])
+        
+        # Select probability threshold that optimizes R2 score
+        pred_presence_prob = self.presence_model.predict(self.x)
+        pred_cost_given_presence = self.cost_model.predict(self.x)
+        true_cost = self.y
+        
+        self.threshold = maximized_R2_threshold(pred_presence_prob,pred_cost_given_presence,true_cost)
+                
         return(None)
 
-    def model_predict(self,x):
+    def model_predict(self,permuted=False):
         """
-        param: x: testing data
-        returns: y_pred: predicted value of response variable
+        Predict on test data. If permuted=True, use x_perm instead of x_test. 
         """
-        y_pred = self.model.predict(x)
-        return(y_pred)
+        
+        if permuted:
+            pred_presence_prob = self.presence_model.predict(self.x_perm)
+            pred_cost_given_presence = self.cost_model.predict(self.x_perm)
+        else:
+            pred_presence_prob = self.presence_model.predict(self.x_test)
+            pred_cost_given_presence = self.cost_model.predict(self.x_test)
+        
+        y_pred = pred_cost_given_presence*((pred_presence_prob > self.threshold).astype(int))
+        extra = [pred_presence_prob,pred_cost_given_presence]
+        
+        return(y_pred,extra)
 
-    def model_classify(self,x,threshold):
+    def permute_feature(self,feature):
         """
-        param: x: testing data
-        param: threshold: assign 1 if Pr(y=1 | x) > threshold
+        param: feature: name of feature to randomly shuffle in testing data
         """
-        y_pred = self.model_predict(x)
-        y_class = (y_pred > threshold).astype(int)
-        return(y_class)
+        idx = self.features.index(feature)        
+        self.x_perm[:,idx] = np.random.permutation(self.x_perm[:,idx])
+        return(None)
+    
+    def reset_permuted(self):
+        """
+        Reset permuted version of test data. 
+        """
+        self.x_perm = self.x_test.copy()
+        return(None)
+    
+    def objective_function(self,permuted=False):
+        """
+        Objective function to be minimized in feature selection / hyperparameter tuning.
+        In this case, -1*(R-squared). 
+        """
+        
+        if permuted:
+            y_pred,extra = self.model_predict(permuted=True)
+        else:
+            y_pred,extra = self.model_predict()
+            
+        rsq = metrics.r2_score(self.y_test, y_pred)
+        obj = -1*rsq
+        
+        return(obj)
+    
+class FeatureSelectionObject:
+    
+    def __init__(self,data,response_variable,features,k,alpha,n_iter,n_cores=1):
+        """
+        param: data: pandas dataframe of training data (m x n+1)
+        param: response_variable: name of response variable
+        param: features: list of potential predictors (n)
+        param: k: number of folds to use in feature selection cross-validation loop
+        param: alpha: significance level required for feature inclusion
+        param: n_iter: number of interations to perform during permutation testing
+        param: n_cores: number of threads to use for parallelization of model
+        """
+        self.data = data
+        self.features = [f for f in features if f != response_variable and f != data.index.name]
+        self.eliminated_features = []
+        self.response_variable = response_variable
+        self.k = k
+        self.kf = KFold(n_splits=self.k,random_state=None,shuffle=True)
+        self.alpha = alpha
+        self.n_iter = n_iter
+        self.n_cores = n_cores
+        
+    def compute_p_values(self):
+        """
+        Iterate through included features to see if we can remove any without degrading model performance. 
+        """
+        n_features = len(self.features)
+        p_value_arr = np.zeros((n_features,self.k))
+        
+        # Split in to k test/train folds
+        for k,(train_indices,test_indices) in enumerate(self.kf.split(self.data)):
+            
+            train_df = self.data.iloc[train_indices].copy()
+            test_df = self.data.iloc[test_indices].copy()
+            
+            # Fit model and determine objective function value
+            mod = ZeroInflatedRandomForest(train_df,test_df,self.response_variable,self.features,n_cores=self.n_cores)
+            mod.model_fit()
+            reference_obj = mod.objective_function()
+            
+            # Use permutation testing to determine p-value for feature significance
+            for j,feature in enumerate(self.features):
+                            
+                mod.reset_permuted()
+                obj_dist = np.zeros(self.n_iter)
+                
+                for i in range(self.n_iter):
+                    mod.permute_feature(feature)
+                    obj_dist[i] = mod.objective_function(permuted=True)
+                    
+                # Calculate probability of getting prediction error this low by chance
+                p_value = np.sum(obj_dist < reference_obj)/self.n_iter
+                p_value = np.max([p_value,1/self.n_iter])
+                p_value_arr[j,k] = p_value
+                
+        # Pool p-values from each CV fold together using Fisher's method to get "fused" p-value
+        x_chisq = np.sum(-2*np.log(p_value_arr),axis=1)
+        fused_p_value = 1-stats.chi2.cdf(x_chisq,2*self.k)
+        
+        feature_importance_order = np.argsort(fused_p_value)
+        
+        print('Permutation importance ranking:',flush=True)
+        for i,idx in enumerate(feature_importance_order):
+            if fused_p_value[idx] >= 0.001:
+                print(f'    {i+1}) {self.features[idx]} (p={fused_p_value[idx]:.3f})',flush=True)
+            else:
+                print(f'    {i+1}) {self.features[idx]} (p<0.001)',flush=True)
+        
+        return(fused_p_value)
+    
+    def select_features(self):
+        """
+        Attempt to remove features from model until only those meeting significance threshold remain. 
+        """
 
-    def update_test_data(self,test_df):
-        """
-        param: test_df: new version of testing data to use
-        """
-        self.x_test = test_df[self.features].to_numpy()
-        self.y_test = test_df[self.response_variable].to_numpy()
+        keepgoing = True
+        i=0
+        
+        t0 = time.time()
+
+        while keepgoing:
+
+            print(f'\n*** Round {i+1}: {len(self.features)} features ***\n')
+            
+            t1 = time.time()
+
+            p_values = self.compute_p_values()
+            
+            t2 = time.time()
+            elapsed_time = format_elapsed_time(t2-t1)
+            cumulative_elapsed_time = format_elapsed_time(t2-t0)
+
+            # Determine the least important feature based on fused p-value
+            max_p_value = np.max(p_values)
+            max_p_feature = self.features[np.argmax(p_values)]
+            
+            if max_p_value >= self.alpha:
+                
+                self.features.remove(max_p_feature)
+                print(f'\nEliminated {max_p_feature} (p={max_p_value:.3f}). Time elapsed: {elapsed_time} / {cumulative_elapsed_time} cumulative.')
+                
+            else:
+                keepgoing=False
+                
+            i+=1
+
+        print('\n*** Feature Selection Complete ***\n')
+        print('Included features:')
+
+        for f in self.features:
+            print(f'    {f}')
 
         return(None)
+    
+def tune_hyperparams(data,response_variable,features,k,n_cores=1):
+    
+    """
+    param: data: pandas dataframe of training data
+    param: response_variable: name of response variable
+    param: features: list of potential predictors
+    param: k: number of folds to use in feature selection cross-validation loop
+    param: n_cores: number of threads to use for parallelization of model
+    """   
+    
+    presence_param_grid = {'n_estimators':[200],'max_features':[0.3,0.5,0.7],'max_depth':[6,9]}
+    cost_param_grid = {'n_estimators':[200],'max_features':[0.3,0.5,0.7],'max_depth':[6,9]}
 
+    presence_params = [dict(zip(presence_param_grid.keys(),values)) for values in product(*presence_param_grid.values())]
+    cost_params = [dict(zip(cost_param_grid.keys(),values)) for values in product(*cost_param_grid.values())]
+    hyperparam_options = list(product(presence_params,cost_params))
+    
+    n_options = len(hyperparam_options)
+    obj_arr = np.zeros((n_options,k))
+    
+    kf = KFold(n_splits=k,random_state=None,shuffle=True)
+    
+    print(f'\nTuning hyperparameters ({n_options} options)',flush=True)
+    t0 = time.time()
+    
+    # Split in to k test/train folds
+    for fold_k,(train_indices,test_indices) in enumerate(kf.split(data)):
+            
+        train_df = data.iloc[train_indices].copy()
+        test_df = data.iloc[test_indices].copy()
+        
+        # For each potential hyperparameter combination, evaulate model performance
+        for i,(presence_hyperparams,cost_hyperparams) in enumerate(hyperparam_options):
+                        
+            mod = ZeroInflatedRandomForest(train_df,test_df,response_variable,features,presence_hyperparams=presence_hyperparams,cost_hyperparams=cost_hyperparams,n_cores=n_cores)
+            mod.model_fit()
+            obj_arr[i,fold_k] = mod.objective_function()
+            
+    # Calculate mean value across folds
+    mean_obj = np.mean(obj_arr,axis=1)
+    
+    best_presence_params,best_cost_params = hyperparam_options[np.argmin(mean_obj)]
+    
+    t1 = time.time()
+    elapsed_time = format_elapsed_time(t1-t0)
+    
+    print('Presence model:',flush=True)
+    
+    for key,value in best_presence_params.items():
+        print(f'    {key}:{value}',flush=True)
+        
+    print('Cost model:',flush=True)
+        
+    for key,value in best_cost_params.items():
+        print(f'    {key}:{value}',flush=True)
+    
+    print(f'Time elapsed: {elapsed_time}',flush=True)
+    
+    return(best_presence_params,best_cost_params)
+    
 # Function to impute values of missing attributes in spatial data
 def impute_missing_spatially(gdf,columns=None):
     """
@@ -168,49 +396,6 @@ def confusion_matrix(y_pred,y_true,threshold):
     d = {'TP':TP,'FP':FP,'TN':TN,'FN':FN,'TPR':TPR,'TNR':TNR,'PPV':PPV}
     return(d)
 
-def minimized_difference_threshold(y_pred,y_true):
-    """
-    Calculate the optimal threshold (cut-point) for classification based on
-    the minimized difference criterion defined by Jimenez-Valverde et al.
-    (doi:10.1016/j.actao.2007.02.001)
-
-    param: y_pred: numpy array of predicted class probabilities
-    param: y_true: numpy array of true class labels
-    """
-    TPR = np.vectorize(lambda x: confusion_matrix(y_pred,y_true,x)['TPR'])
-    TNR = np.vectorize(lambda x: confusion_matrix(y_pred,y_true,x)['TNR'])
-    abs_diff = lambda x: np.abs(TPR(x) - TNR(x))
-    threshold_vals = np.linspace(0,1,101)
-    threshold = threshold_vals[np.argmin(abs_diff(threshold_vals))]
-    return(threshold)
-
-def maximized_accuracy_threshold(y_pred,y_true):
-    """
-    Calculate the optimal threshold (cut-point) for classification that
-    maximized accuracy.
-
-    param: y_pred: numpy array of predicted class probabilities
-    param: y_true: numpy array of true class labels
-    """
-    accuracy = np.vectorize(lambda x: metrics.accuracy_score(y_true, (y_pred > x).astype(int)))
-    threshold_vals = np.linspace(0,1,101)
-    threshold = threshold_vals[np.argmax(accuracy(threshold_vals))]
-    return(threshold)
-
-def maximized_fbeta_threshold(y_pred,y_true,beta=1):
-    """
-    Calculate the optimal threshold (cut-point) for classification that
-    maximized the f_beta score (beta=1 equivalent to f1 score).
-
-    param: y_pred: numpy array of predicted class probabilities
-    param: y_true: numpy array of true class labels
-    param: beta: relative importance of recall vs precision
-    """
-    fbeta = np.vectorize(lambda x: metrics.fbeta_score(y_true, (y_pred > x).astype(int), beta=beta))
-    threshold_vals = np.linspace(0,1,101)
-    threshold = threshold_vals[np.argmax(fbeta(threshold_vals))]
-    return(threshold)
-
 # Helper function to format elapsed time in seconds
 def format_elapsed_time(seconds):
     seconds = int(np.round(seconds))
@@ -221,65 +406,47 @@ def format_elapsed_time(seconds):
     return(f'{hours}h:{minutes:02d}m:{seconds:02d}s')
 
 # Cross validation setup
-def cv_fold(fold,train_df,test_df,presence_response_variable,presence_features,cost_response_variable,cost_features,n_cores=1):
+def cv_fold(fold,train_df,test_df,response_variable,features,select_features=True,hyperparams=None,n_cores=1):
         """
         param: fold: fold number
         param: train_df: training data
         param: test_df: testing data
-        param: presence_response_variable: name of binary response variable indicating presence/absence of flooding
-        param: presence_features: list of features used to predict the presence/absence of flood damage
-        param: cost_response_variable: name of continuous variable indicating cost of damages
-        param: cost_features: list of features used to predict the cost of damage to flooded structures
+        param: response_variable: name of variable denoting presence and cost of flood damage
+        param: features: list of features used to predict flood damage
+        param: select_features: if true, perform feature selection
+        param: hyperparams: tuple of presence / cost model hyperparameters. If none, set via hyperparameter tuning. 
         param: n_cores: number of cores to use if running tasks in parallel
         """
         
         test_df['fold'] = fold
         
-        fpr_viz_vals = np.linspace(0,1,501)
-        rec_viz_vals = np.linspace(0,1,501)
+        # If needed, perform feature selection
+        if select_features:
+            FS = FeatureSelectionObject(train_df,response_variable,features,5,0.2,50,n_cores=n_cores)
+            FS.select_features()
+            features = FS.features
+            
+        # If needed, tune hyperparameters
+        if hyperparams is None:
+            presence_params,cost_params = tune_hyperparams(train_df,response_variable,features,5,n_cores=n_cores)
+        else:
+            presence_params,cost_params = hyperparams
         
-        # Determine hyperparameters for random forest models
-        presence_hyperparams,cost_hyperparams = tune_hyperparams(train_df,presence_response_variable,presence_features,cost_response_variable,cost_features,n_cores=n_cores)
+        # Fit flood damage model
+        mod = ZeroInflatedRandomForest(train_df,test_df,response_variable,features,presence_hyperparams=presence_params,cost_hyperparams=cost_params,n_cores=n_cores)
+        mod.model_fit()
         
-        # Fit prediction model for presence/absence of flooding
-        presence_mod = RegressionObject(train_df,test_df,test_df,presence_response_variable,presence_features,n_cores=n_cores,hyperparams=presence_hyperparams)
-        presence_mod.model_fit()
-        
-        # If not already specified, calculate the optimal threshold based on
-        # the training set (note that this includes pseudo-absences)
-        y_pred_threshold = presence_mod.model_predict(presence_mod.x)
-        y_true_threshold = presence_mod.y
-        threshold = maximized_accuracy_threshold(y_pred_threshold,y_true_threshold)        
-        
-        # Predict presence/absence for test set
-        y_pred = presence_mod.model_predict(presence_mod.x_test)
-
-        # Get actual class labels for test set
-        y_true = presence_mod.y_test
-
-        # Assign class labels to predictions
-        y_class = presence_mod.model_classify(presence_mod.x_test,threshold)
+        # Predict flood damage in test set
+        c_pred,extra = mod.model_predict()
+        presence_prob,cost_given_presence = extra
         
         # Add predictions to dataset
-        test_df[f'{presence_response_variable}_prob'] = y_pred
-        test_df[f'{presence_response_variable}_class'] = y_class
-        
-        # Fit prediction model for cost of damage among flooded homes
-        cost_train_df = train_df[train_df[presence_response_variable]==1]
-        cost_mod = RegressionObject(cost_train_df,test_df,test_df,cost_response_variable,cost_features,n_cores=n_cores,hyperparams=cost_hyperparams)
-        cost_mod.model_fit()
-        
-        # Predict cost of flood damage among buildings in test set
-        c_pred = cost_mod.model_predict(cost_mod.x_test)
-        
-        # Assume buildings classified as non-flooded don't incur damage costs
-        c_pred = y_class*c_pred 
-        
-        # Get actual cost of flood damage for test set
-        c_true = cost_mod.y_test
+        test_df[f'flood_damage_prob'] = presence_prob
+        test_df[f'flood_damage_class'] = (c_pred > 0).astype(int)
         
         # Add predictions to dataset
-        test_df[f'{cost_response_variable}_pred'] = c_pred
+        test_df[f'cost_given_presence'] = cost_given_presence
+        test_df[f'{response_variable}_pred'] = c_pred
             
         return(test_df)
     
@@ -333,43 +500,6 @@ def performance_metrics(y_pred,y_class,y_true,c_pred,c_true):
     pr_df = pd.DataFrame({'rec':rec_viz_vals,'prec':prec_viz_vals})
     
     return(results_dict,roc_df,pr_df)
-
-def tune_hyperparams(data,presence_response_variable,presence_features,cost_response_variable,cost_features,k=5,n_cores=1):
-    """
-    param: data: training data used for hyperparameter tuning
-    param: presence_response_variable: name of binary response variable indicating presence/absence of flooding
-    param: presence_features: list of features used to predict the presence/absence of flood damage
-    param: cost_response_variable: name of continuous variable indicating cost of damages
-    param: cost_features: list of features used to predict the cost of damage to flooded structures
-    param: use_adjusted: if true, train models using adjusted training data which includes pseudo-absences
-    param: k: number of folds to use in hyperparameter tuning
-    param: n_cores: number of cores to use if running tasks in parallel
-    """        
-        
-    # Determine optimal hyperparameters for presence-absence model
-    y = data[presence_response_variable].to_numpy()
-    x = data[presence_features].to_numpy()
-
-    param_grid = {'n_estimators':[200],'max_features':[1.0],'max_depth':[5,7,9]}
-    model = RandomForestRegressor()
-
-    grid_search = GridSearchCV(model, param_grid=param_grid, cv=k, scoring='neg_mean_squared_error',n_jobs=n_cores)
-    grid_search.fit(x,y)
-    presence_hyperparams = grid_search.best_params_ 
-
-    # Determine optimal hyperparameters for damage cost model
-    m = (data[presence_response_variable]==1)
-    y = data[m][cost_response_variable].to_numpy()
-    x = data[m][cost_features].to_numpy()
-
-    param_grid = {'n_estimators':[200],'max_features':[1.0],'max_depth':[5,7,9]}
-    model = RandomForestRegressor()
-
-    grid_search = GridSearchCV(model, param_grid=param_grid, cv=k, scoring='neg_mean_squared_error',n_jobs=n_cores)
-    grid_search.fit(x,y)
-    cost_hyperparams = grid_search.best_params_
-
-    return(presence_hyperparams,cost_hyperparams)
     
 def build_neighbor_dict(gdf):
     """
@@ -761,12 +891,10 @@ class FloodEvent:
         self.target_dataset = self.target_dataset[self.target_dataset['study_area']==1].reset_index(drop=True)
         return(None)
 
-    def random_cross_validation(self,presence_response_variable,presence_features,cost_response_variable,cost_features,use_adjusted=True,k=5,n_cores=1):
+    def random_cross_validation(self,response_variable,features,use_adjusted=True,k=10,n_cores=1):
         """
-        param: presence_response_variable: name of binary response variable indicating presence/absence of flooding
-        param: presence_features: list of features used to predict the presence/absence of flood damage
-        param: cost_response_variable: name of continuous variable indicating cost of damages
-        param: cost_features: list of features used to predict the cost of damage to flooded structures
+        param: response_variable: name of variable denoting presence and cost of flood damage
+        param: features: list of features used to predict flood damage
         param: use_adjusted: if true, train models using adjusted training data which includes pseudo-absences
         param: k: number of k-fold cross validation iterations to perform
         param: n_cores: number of cores to use if running tasks in parallel
@@ -792,7 +920,7 @@ class FloodEvent:
             train_df = data.iloc[train_indices].copy()
             test_df = data.iloc[test_indices].copy()
             
-            predictions = cv_fold(i,train_df,test_df,presence_response_variable,presence_features,cost_response_variable,cost_features,n_cores=n_cores)
+            predictions = cv_fold(i,train_df,test_df,response_variable,features,n_cores=n_cores)            
             predictions_list.append(predictions)
             
             t2 = time.time()
@@ -800,16 +928,16 @@ class FloodEvent:
             elapsed_time = format_elapsed_time(t2-t1)
             cumulative_elapsed_time = format_elapsed_time(t2-t0)
             
-            print(f'CV fold {i+1} / {k} (time elapsed: {elapsed_time} last iteration / {cumulative_elapsed_time} cumulative)',flush=True)
+            print(f'\n\n###--- CV fold {i+1} / {k} (time elapsed: {elapsed_time} last iteration / {cumulative_elapsed_time} cumulative) ---###\n\n',flush=True)
 
         # Calculate performance metrics
         predictions_df = pd.concat(predictions_list)
         
-        y_pred = predictions_df[f'{presence_response_variable}_prob'].to_numpy()
-        y_class = predictions_df[f'{presence_response_variable}_class'].to_numpy()
-        y_true = predictions_df[presence_response_variable].to_numpy()
-        c_pred = predictions_df[f'{cost_response_variable}_pred'].to_numpy()
-        c_true = predictions_df[cost_response_variable].to_numpy()
+        y_pred = predictions_df[f'flood_damage_prob'].to_numpy()
+        y_class = predictions_df[f'flood_damage_class'].to_numpy()
+        y_true = predictions_df['flood_damage'].to_numpy()
+        c_pred = predictions_df[f'{response_variable}_pred'].to_numpy()
+        c_true = predictions_df[response_variable].to_numpy()
         
         results_dict,roc_curve,pr_curve = performance_metrics(y_pred,y_class,y_true,c_pred,c_true)
         
@@ -820,82 +948,10 @@ class FloodEvent:
 
         return(None)
     
-    def spatial_cross_validation(self,presence_response_variable,presence_features,cost_response_variable,cost_features,tiles,use_adjusted=True,max_k=500,n_cores=1):
+    def predict_flood_damage(self,response_variable,features,use_adjusted=True,n_cores=1):
         """
-        param: presence_response_variable: name of binary response variable indicating presence/absence of flooding
-        param: presence_features: list of features used to predict the presence/absence of flood damage
-        param: cost_response_variable: name of continuous variable indicating cost of damages
-        param: cost_features: list of features used to predict the cost of damage to flooded structures
-        param: tiles: spatial blocks used to define cross-validation splits
-        param: use_adjusted: if true, train models using adjusted training data which includes pseudo-absences
-        param: max_k: maximum number of cross-validation folds
-        param: n_cores: number of cores to use if running tasks in parallel
-        """
-        
-        tiles = tiles[tiles['geometry'].intersects(self.study_area)][['geometry']]
-        tiles.index = np.arange(len(tiles))
-        
-        if use_adjusted:
-            data = self.adjusted_training_dataset
-        else:
-            data = self.training_dataset
-            
-        data = gpd.sjoin(data,tiles).rename(columns={'index_right':'tile_index'})
-        
-        splits = spatial_block_cv_split(tiles,k=max_k)
-        k = len(splits)
-                
-        print(f'\n*** {k}-fold cross validation (spatial) ***',flush=True)
-            
-        predictions_list = []
-        
-        t0 = time.time()
-            
-        for i,(train_tile_indices,test_tile_indices) in enumerate(splits):
-            
-            t1 = time.time()
-            
-            train_df = data[data['tile_index'].isin(train_tile_indices)].copy()
-            test_df = data[data['tile_index'].isin(test_tile_indices)].copy()
-            
-            if len(test_df) > 0:
-            
-                predictions = cv_fold(i,train_df,test_df,presence_response_variable,presence_features,cost_response_variable,cost_features,n_cores=n_cores)
-                predictions_list.append(predictions)
-            
-            t2 = time.time()
-            
-            elapsed_time = format_elapsed_time(t2-t1)
-            cumulative_elapsed_time = format_elapsed_time(t2-t0)
-            
-            print(f'CV fold {i+1} / {k} (time elapsed: {elapsed_time} last iteration / {cumulative_elapsed_time} cumulative)',flush=True)
-
-        # Calculate performance metrics
-        predictions_df = pd.concat(predictions_list)
-        
-        y_pred = predictions_df[f'{presence_response_variable}_prob'].to_numpy()
-        y_class = predictions_df[f'{presence_response_variable}_class'].to_numpy()
-        y_true = predictions_df[presence_response_variable].to_numpy()
-        c_pred = predictions_df[f'{cost_response_variable}_pred'].to_numpy()
-        c_true = predictions_df[cost_response_variable].to_numpy()
-        
-        results_dict,roc_curve,pr_curve = performance_metrics(y_pred,y_class,y_true,c_pred,c_true)
-        
-        self.spatial_cv_tiles = tiles
-        self.spatial_cv_splits = splits
-        self.spatial_cv_predictions = predictions_df
-        self.spatial_cv_performance_metrics = results_dict
-        self.spatial_cv_roc_curve = roc_curve
-        self.spatial_cv_pr_curve = pr_curve
-
-        return(None)
-    
-    def predict_flood_damage(self,presence_response_variable,presence_features,cost_response_variable,cost_features,use_adjusted=True,n_cores=1):
-        """
-        param: presence_response_variable: name of binary response variable indicating presence/absence of flooding
-        param: presence_features: list of features used to predict the presence/absence of flood damage
-        param: cost_response_variable: name of continuous variable indicating cost of damages
-        param: cost_features: list of features used to predict the cost of damage to flooded structures
+        param: response_variable: name of variable denoting presence and cost of flood damage
+        param: features: list of features used to predict flood damage
         param: use_adjusted: if true, train models using adjusted training data which includes pseudo-absences
         param: n_cores: number of cores to use if running tasks in parallel
         """
@@ -904,66 +960,65 @@ class FloodEvent:
         else:
             train_df = self.training_dataset
             
-        # Determine hyperparameters for random forest models
-        presence_hyperparams,cost_hyperparams = tune_hyperparams(train_df,presence_response_variable,presence_features,cost_response_variable,cost_features,n_cores=n_cores)
+        # Perform feature selection
+        FS = FeatureSelectionObject(train_df,response_variable,features,5,0.2,50,n_cores=n_cores)
+        FS.select_features()
+        features = FS.features
+            
+        # Tune hyperparameters of random forest models
+        presence_params,cost_params = tune_hyperparams(train_df,response_variable,features,5,n_cores=n_cores)
         
-        # Train presence / absence prediction model
-        presence_mod = RegressionObject(train_df,train_df,self.target_dataset,presence_response_variable,presence_features,n_cores=n_cores,hyperparams=presence_hyperparams)
-        presence_mod.model_fit()
+        # Record selected features and hyperparams 
+        self.response_variable = response_variable
+        self.features = features
+        self.presence_hyperparams = presence_params
+        self.cost_hyperparams = cost_params
         
-        # Determine maximum accuracy threshold based on training data
-        y_pred_threshold = presence_mod.model_predict(presence_mod.x)
-        y_true_threshold = presence_mod.y
-        threshold = maximized_accuracy_threshold(y_pred_threshold,y_true_threshold)
-        self.threshold = threshold
+        # Fit flood damage model
+        mod = ZeroInflatedRandomForest(train_df,self.target_dataset,response_variable,features,presence_hyperparams=presence_params,cost_hyperparams=cost_params,n_cores=n_cores)
+        mod.model_fit()
         
-        # Predict presence of flood damage
-        self.target_dataset[f'{presence_response_variable}_prob'] = presence_mod.model_predict(presence_mod.x_target)
-        self.target_dataset[f'{presence_response_variable}_class'] = presence_mod.model_classify(presence_mod.x_target,threshold)
+        # Record threshold used for classification
+        self.threshold = mod.threshold
+        self.model = mod
         
-        # Get feature importance
-        importances = presence_mod.model.feature_importances_
-        std = np.std([tree.feature_importances_ for tree in presence_mod.model.estimators_], axis=0)
+        # Predict flood damage among uninsured
+        c_pred,extra = mod.model_predict()
+        presence_prob,cost_given_presence = extra
+        
+        # Add predictions to dataset
+        self.target_dataset['flood_damage_prob'] = presence_prob
+        self.target_dataset['flood_damage_class'] = (c_pred > 0).astype(int)
+        
+        # Add predictions to dataset
+        self.target_dataset['cost_given_presence'] = cost_given_presence
+        self.target_dataset[f'{response_variable}_pred'] = c_pred
+        
+        # Get feature importance for presence/absence prediction
+        
+        importances = mod.presence_model.feature_importances_
+        std = np.std([tree.feature_importances_ for tree in mod.presence_model.estimators_], axis=0)
         importance_order = np.argsort(importances)
 
         importances = importances[importance_order]
         std = std[importance_order]
-        sorted_features = np.array(presence_features)[importance_order]
+        sorted_features = np.array(features)[importance_order]
         
         self.presence_feature_importance = pd.DataFrame({'feature':sorted_features,'importance':importances,'std':std})
         self.presence_feature_importance = self.presence_feature_importance.sort_values(by='importance',ascending=False).reset_index(drop=True)
-        self.presence_response_variable = presence_response_variable
-        self.presence_features = presence_features
-        self.presence_model = presence_mod
-        self.presence_hyperparams = presence_hyperparams
         
-        # Predict cost of flood damage
-        m = (train_df[presence_response_variable]==1)
-        cost_mod = RegressionObject(train_df[m],train_df[m],self.target_dataset,cost_response_variable,cost_features,n_cores=n_cores,hyperparams=cost_hyperparams)
+        # Get feature importance for cost given presence model
         
-        cost_mod.model_fit()
-        
-        # Predict cost of damage among buildings predicted as flooded
-        self.target_dataset[cost_response_variable] = cost_mod.model_predict(cost_mod.x_target)
-        
-        # Assume buildings classified as non-flooded don't incur damage costs
-        self.target_dataset[cost_response_variable] = self.target_dataset[cost_response_variable]*self.target_dataset[f'{presence_response_variable}_class']
-        
-        # Get feature importance
-        importances = cost_mod.model.feature_importances_
-        std = np.std([tree.feature_importances_ for tree in cost_mod.model.estimators_], axis=0)
+        importances = mod.cost_model.feature_importances_
+        std = np.std([tree.feature_importances_ for tree in mod.cost_model.estimators_], axis=0)
         importance_order = np.argsort(importances)
 
         importances = importances[importance_order]
         std = std[importance_order]
-        sorted_features = np.array(cost_features)[importance_order]
+        sorted_features = np.array(features)[importance_order]
         
         self.cost_feature_importance = pd.DataFrame({'feature':sorted_features,'importance':importances,'std':std})
         self.cost_feature_importance = self.cost_feature_importance.sort_values(by='importance',ascending=False).reset_index(drop=True)
-        self.cost_response_variable = cost_response_variable
-        self.cost_features = cost_features
-        self.cost_model = cost_mod
-        self.cost_hyperparams=cost_hyperparams
         
         return(None)
 
@@ -1000,3 +1055,72 @@ class FloodEvent:
         agg_df = agg_df.sort_values(by=stratification_columns)
 
         return(agg_df,combined_df)
+    
+    
+    def spatial_cross_validation(self,tiles,use_adjusted=True,max_k=500,n_cores=1):
+        """
+        Perform spatial block CV. Should be run after running the "predict_flood_damage" function to ensure that features / hyperparameters have been tuned and specified. 
+        
+        param: tiles: spatial blocks used to define cross-validation splits
+        param: use_adjusted: if true, train models using adjusted training data which includes pseudo-absences
+        param: max_k: maximum number of cross-validation folds
+        param: n_cores: number of cores to use if running tasks in parallel
+        """
+        
+        tiles = tiles[tiles['geometry'].intersects(self.study_area)][['geometry']]
+        tiles.index = np.arange(len(tiles))
+        
+        if use_adjusted:
+            data = self.adjusted_training_dataset
+        else:
+            data = self.training_dataset
+            
+        data = gpd.sjoin(data,tiles).rename(columns={'index_right':'tile_index'})
+        
+        splits = spatial_block_cv_split(tiles,k=max_k)
+        k = len(splits)
+                
+        print(f'\n*** {k}-fold cross validation (spatial) ***',flush=True)
+            
+        predictions_list = []
+        
+        t0 = time.time()
+            
+        for i,(train_tile_indices,test_tile_indices) in enumerate(splits):
+            
+            t1 = time.time()
+            
+            train_df = data[data['tile_index'].isin(train_tile_indices)].copy()
+            test_df = data[data['tile_index'].isin(test_tile_indices)].copy()
+            
+            if len(test_df) > 0:
+            
+                predictions = cv_fold(i,train_df,test_df,self.response_variable,self.features,select_features=False,hyperparams=(self.presence_hyperparams,self.cost_hyperparams),n_cores=n_cores)            
+            predictions_list.append(predictions)
+            
+            t2 = time.time()
+            
+            elapsed_time = format_elapsed_time(t2-t1)
+            cumulative_elapsed_time = format_elapsed_time(t2-t0)
+            
+            print(f'###--- CV fold {i+1} / {k} (time elapsed: {elapsed_time} last iteration / {cumulative_elapsed_time} cumulative) ---###',flush=True)
+
+        # Calculate performance metrics
+        predictions_df = pd.concat(predictions_list)
+        
+        y_pred = predictions_df[f'flood_damage_prob'].to_numpy()
+        y_class = predictions_df[f'flood_damage_class'].to_numpy()
+        y_true = predictions_df['flood_damage'].to_numpy()
+        c_pred = predictions_df[f'{self.response_variable}_pred'].to_numpy()
+        c_true = predictions_df[self.response_variable].to_numpy()
+        
+        results_dict,roc_curve,pr_curve = performance_metrics(y_pred,y_class,y_true,c_pred,c_true)
+        
+        self.spatial_cv_tiles = tiles
+        self.spatial_cv_splits = splits
+        self.spatial_cv_predictions = predictions_df
+        self.spatial_cv_performance_metrics = results_dict
+        self.spatial_cv_roc_curve = roc_curve
+        self.spatial_cv_pr_curve = pr_curve
+
+        return(None)

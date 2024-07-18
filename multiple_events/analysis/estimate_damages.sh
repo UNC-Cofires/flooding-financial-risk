@@ -14,6 +14,7 @@ export OPENBLAS_NUM_THREADS=$SLURM_NTASKS
 export BLIS_NUM_THREADS=$SLURM_NTASKS
 export VECLIB_MAXIMUM_THREADS=$SLURM_NTASKS
 export NUMEXPR_NUM_THREADS=$SLURM_NTASKS
+export PYTHONWARNINGS="ignore"
 cd /proj/characklab/flooddata/NC/multiple_events/analysis
 module purge
 module load anaconda/2023.03
