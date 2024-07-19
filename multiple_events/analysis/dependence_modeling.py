@@ -736,8 +736,18 @@ class empirical_distribution:
         self.ppf = interp.interp1d(F,x,kind='linear',bounds_error=False,fill_value=(np.min(x),np.max(x)))
         
         if estimate_pdf:
+            
+            # Estimate empirical PDF using kernel density estimation
             self.kde = stats.gaussian_kde(x,weights=weights)
-            self.pdf = np.vectorize(self.kde.pdf)
+            kde_pdf = np.vectorize(self.kde.pdf)
+            
+            # Becaues stats.gaussian_kde.pdf function is super slow, compute the value of PDF once at sampled points,
+            # then use linear interpolation to evaluate PDF for all subsequent computations. 
+            # This is over 1000x faster than calling stats.guassian_kde.pdf each time. 
+            f = kde_pdf(x)
+            area = si.trapezoid(f,x) # Ensure area under interpolated PDF will sum to 1.0
+            f = f/area
+            self.pdf = interp.interp1d(x,f,kind='linear',bounds_error=False,fill_value=(0,0))
         
     def rvs(self,n=1):
         """
