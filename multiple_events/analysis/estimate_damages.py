@@ -286,7 +286,7 @@ floodevent.random_cross_validation(response_variable,features,use_adjusted=True,
 floodevent.predict_flood_damage(response_variable,features,use_adjusted=True,n_cores=n_cores)
 
 ## *** PERFORM SPATIAL CROSS VALIDATION *** ###
-floodevent.spatial_cross_validation(tiles,use_adjusted=True,max_k=500,n_cores=n_cores)
+#floodevent.spatial_cross_validation(tiles,use_adjusted=True,max_k=500,n_cores=n_cores)
 
 ## *** SAVE RESULTS *** ###
 with open(os.path.join(outfolder,f'{peak_date}_{event_name}_FloodEvent.object'),'wb') as f:

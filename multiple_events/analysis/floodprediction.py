@@ -11,18 +11,18 @@ import scipy.stats as stats
 from itertools import product
 import time
 
-def maximized_R2_threshold(pred_presence_prob,pred_cost_given_presence,true_cost):
+def minimized_error_threshold(pred_presence_prob,pred_cost_given_presence,true_cost):
     """
-    Return the probability threshold that maximizes coefficient of determination (R2) for a zero-inflated model. 
+    Return the probability threshold that minimizes the mean squared error for a zero-inflated model. 
     
     param: pred_presence_prob: predicted probability of flooding
     param: pred_cost_given_presence: predicted damage cost conditional on flooding
     param: true_cost: observed flood damage cost
     """
     
-    f = np.vectorize(lambda x: metrics.r2_score(true_cost, pred_cost_given_presence*(pred_presence_prob > x).astype(int)))
+    f = np.vectorize(lambda x: metrics.mean_squared_error(true_cost, pred_cost_given_presence*(pred_presence_prob > x).astype(int)))
     threshold_vals = np.linspace(0,1,101)
-    threshold = threshold_vals[np.argmax(f(threshold_vals))]
+    threshold = threshold_vals[np.argmin(f(threshold_vals))]
     return(threshold)
 
 # *** Class for performing Random Forest regression on zero-inflated data (e.g., insurance claims) ***
@@ -72,7 +72,7 @@ class ZeroInflatedRandomForest:
         pred_cost_given_presence = self.cost_model.predict(self.x)
         true_cost = self.y
         
-        self.threshold = maximized_R2_threshold(pred_presence_prob,pred_cost_given_presence,true_cost)
+        self.threshold = minimized_error_threshold(pred_presence_prob,pred_cost_given_presence,true_cost)
                 
         return(None)
 
@@ -111,7 +111,7 @@ class ZeroInflatedRandomForest:
     def objective_function(self,permuted=False):
         """
         Objective function to be minimized in feature selection / hyperparameter tuning.
-        In this case, -1*(R-squared). 
+        (In this case, mean squared error). 
         """
         
         if permuted:
@@ -119,8 +119,7 @@ class ZeroInflatedRandomForest:
         else:
             y_pred,extra = self.model_predict()
             
-        rsq = metrics.r2_score(self.y_test, y_pred)
-        obj = -1*rsq
+        obj = metrics.mean_squared_error(y_true, y_pred)
         
         return(obj)
     
