@@ -119,7 +119,7 @@ class ZeroInflatedRandomForest:
         else:
             y_pred,extra = self.model_predict()
             
-        obj = metrics.mean_squared_error(y_true, y_pred)
+        obj = metrics.mean_squared_error(self.y_test, y_pred)
         
         return(obj)
     
