@@ -13,14 +13,14 @@ import time
 
 def minimized_error_threshold(pred_presence_prob,pred_cost_given_presence,true_cost):
     """
-    Return the probability threshold that minimizes the mean absolute error (MAE) for a zero-inflated model. 
+    Return the probability threshold that minimizes the mean squared log error (MSLE) for a zero-inflated model. 
     
     param: pred_presence_prob: predicted probability of flooding
     param: pred_cost_given_presence: predicted damage cost conditional on flooding
     param: true_cost: observed flood damage cost
     """
     
-    f = np.vectorize(lambda x: metrics.mean_absolute_error(true_cost, pred_cost_given_presence*(pred_presence_prob > x).astype(int)))
+    f = np.vectorize(lambda x: metrics.mean_squared_log_error(true_cost, pred_cost_given_presence*(pred_presence_prob > x).astype(int)))
     threshold_vals = np.linspace(0,1,101)
     threshold = threshold_vals[np.argmin(f(threshold_vals))]
     return(threshold)
@@ -119,7 +119,7 @@ class ZeroInflatedRandomForest:
         else:
             y_pred,extra = self.model_predict()
             
-        obj = metrics.mean_absolute_error(self.y_test, y_pred)
+        obj = metrics.mean_squared_log_error(self.y_test, y_pred)
         
         return(obj)
     
