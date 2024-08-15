@@ -11,6 +11,22 @@ import scipy.stats as stats
 from itertools import product
 import time
 
+def huber_loss(y_true,y_pred,delta=10000):
+    """
+    Loss function that's robust to outliers. Acts as a combination of MAE and MSE. 
+    
+    param: y_true: true value
+    param: y_pred: predicted value
+    param: delta: residual at which loss function transitions from quadratic to linear
+    """
+    a = np.abs(y_true - y_pred)
+    m = (a < delta)
+
+    loss = np.sum(0.5*a[m]**2)
+    loss += np.sum(delta*(a[~m]-0.5*delta))
+    
+    return(loss)
+
 def minimized_error_threshold(pred_presence_prob,pred_cost_given_presence,true_cost):
     """
     Return the probability threshold that minimizes the mean squared log error (MSLE) for a zero-inflated model. 
@@ -20,7 +36,7 @@ def minimized_error_threshold(pred_presence_prob,pred_cost_given_presence,true_c
     param: true_cost: observed flood damage cost
     """
     
-    f = np.vectorize(lambda x: metrics.mean_squared_log_error(true_cost, pred_cost_given_presence*(pred_presence_prob > x).astype(int)))
+    f = np.vectorize(lambda x: huber_loss(true_cost, pred_cost_given_presence*(pred_presence_prob > x).astype(int)))
     threshold_vals = np.linspace(0,1,101)
     threshold = threshold_vals[np.argmin(f(threshold_vals))]
     return(threshold)
@@ -119,7 +135,7 @@ class ZeroInflatedRandomForest:
         else:
             y_pred,extra = self.model_predict()
             
-        obj = metrics.mean_squared_log_error(self.y_test, y_pred)
+        obj = huber_loss(self.y_test, y_pred)
         
         return(obj)
     
