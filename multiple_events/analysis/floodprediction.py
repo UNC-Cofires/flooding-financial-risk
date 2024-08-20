@@ -11,25 +11,30 @@ import scipy.stats as stats
 from itertools import product
 import time
 
-def huber_loss(y_true,y_pred,delta=10000):
+def huber_loss(y_true,y_pred,delta=30000):
     """
-    Loss function that's robust to outliers. Acts as a combination of MAE and MSE. 
+    Loss function that's robust to outliers.
+    For errors < delta, acts like MSE.
+    For errors > delta, acts like MAE.
+    
+    See also: https://en.wikipedia.org/wiki/Huber_los
     
     param: y_true: true value
     param: y_pred: predicted value
     param: delta: residual at which loss function transitions from quadratic to linear
     """
     a = np.abs(y_true - y_pred)
+    n = len(a)
     m = (a < delta)
 
     loss = np.sum(0.5*a[m]**2)
     loss += np.sum(delta*(a[~m]-0.5*delta))
     
-    return(loss)
+    return(loss/n)
 
-def minimized_error_threshold(pred_presence_prob,pred_cost_given_presence,true_cost):
+def minimized_huber_loss_threshold(pred_presence_prob,pred_cost_given_presence,true_cost):
     """
-    Return the probability threshold that minimizes the mean squared log error (MSLE) for a zero-inflated model. 
+    Return the probability threshold that minimizes the Huber loss for a zero-inflated model. 
     
     param: pred_presence_prob: predicted probability of flooding
     param: pred_cost_given_presence: predicted damage cost conditional on flooding
@@ -88,7 +93,7 @@ class ZeroInflatedRandomForest:
         pred_cost_given_presence = self.cost_model.predict(self.x)
         true_cost = self.y
         
-        self.threshold = minimized_error_threshold(pred_presence_prob,pred_cost_given_presence,true_cost)
+        self.threshold = minimized_huber_loss_threshold(pred_presence_prob,pred_cost_given_presence,true_cost)
                 
         return(None)
 
@@ -195,6 +200,7 @@ class FeatureSelectionObject:
                 p_value_arr[j,k] = p_value
                 
         # Pool p-values from each CV fold together using Fisher's method to get "fused" p-value
+        # For details, see: https://en.wikipedia.org/wiki/Fisher%27s_method
         x_chisq = np.sum(-2*np.log(p_value_arr),axis=1)
         fused_p_value = 1-stats.chi2.cdf(x_chisq,2*self.k)
         
@@ -1019,10 +1025,10 @@ class FloodEvent:
         std = std[importance_order]
         sorted_features = np.array(features)[importance_order]
         
-        self.presence_feature_importance = pd.DataFrame({'feature':sorted_features,'importance':importances,'std':std})
-        self.presence_feature_importance = self.presence_feature_importance.sort_values(by='importance',ascending=False).reset_index(drop=True)
+        self.presence_gini_importance = pd.DataFrame({'feature':sorted_features,'importance':importances,'std':std})
+        self.presence_gini_importance = self.presence_gini_importance.sort_values(by='importance',ascending=False).reset_index(drop=True)
         
-        # Get feature importance for cost given presence model
+        # Get gini importance for cost given presence model
         
         importances = mod.cost_model.feature_importances_
         std = np.std([tree.feature_importances_ for tree in mod.cost_model.estimators_], axis=0)
@@ -1032,10 +1038,11 @@ class FloodEvent:
         std = std[importance_order]
         sorted_features = np.array(features)[importance_order]
         
-        self.cost_feature_importance = pd.DataFrame({'feature':sorted_features,'importance':importances,'std':std})
-        self.cost_feature_importance = self.cost_feature_importance.sort_values(by='importance',ascending=False).reset_index(drop=True)
+        self.cost_gini_importance = pd.DataFrame({'feature':sorted_features,'importance':importances,'std':std})
+        self.cost_gini_importance = self.cost_gini_importance.sort_values(by='importance',ascending=False).reset_index(drop=True)        
         
         return(None)
+    
 
     def aggregate_flood_damage(self,stratification_columns,use_adjusted=True):
         """
@@ -1071,6 +1078,58 @@ class FloodEvent:
 
         return(agg_df,combined_df)
     
+    def permutation_feature_importance(self,use_adjusted=True,k=5,n_iter=50,n_cores=1):
+        """
+        Evaluate the effect of permuting a given feature on model performance (as measured by increase in RMSE)
+        
+        param: use_adjusted: if true, train models using adjusted training data which includes pseudo-absences
+        param: k: number of folds to use in feature selection cross-validation loop
+        param: n_iter: number of interations to perform during permutation testing
+        param: n_cores: number of threads to use for parallelization of model
+        """
+        
+        if use_adjusted:
+            data = self.adjusted_training_dataset
+        else:
+            data = self.training_dataset
+                
+        n_features = len(self.features)
+        RMSE_value_arr = np.zeros((k,n_features,n_iter))
+        
+        kf = KFold(n_splits=k,random_state=None,shuffle=True)
+        
+        # Use cross-validation to calculate out-of-sample permutation importance
+        for k,(train_indices,test_indices) in enumerate(kf.split(data)):
+            
+            train_df = data.iloc[train_indices].copy()
+            test_df = data.iloc[test_indices].copy()
+            
+            # Fit flood damage model
+            mod = ZeroInflatedRandomForest(train_df,test_df,self.response_variable,self.features,presence_hyperparams=self.presence_hyperparams,cost_hyperparams=self.cost_hyperparams,n_cores=n_cores)
+            mod.model_fit()
+            
+            y_pred,extra = mod.model_predict()
+            reference_RMSE = np.sqrt(metrics.mean_squared_error(mod.y_test, y_pred))
+            
+            # Use permutation testing to determine p-value for feature significance
+            for j,feature in enumerate(self.features):
+                            
+                mod.reset_permuted()
+                
+                for i in range(n_iter):
+                    mod.permute_feature(feature)
+                    y_pred,extra = mod.model_predict(permuted=True)
+                    RMSE_value_arr[k,j,i] = np.sqrt(metrics.mean_squared_error(mod.y_test, y_pred)) - reference_RMSE
+                    
+        # Save to dataframe
+        d = {}
+        for i,feature in enumerate(self.features):
+            d[feature] = RMSE_value_arr[:,i,:].flatten()
+            
+        perm_df = pd.DataFrame(d)
+        self.permutation_importance = perm_df[perm_df.mean().sort_values(ascending=False).index]
+                    
+        return(None)
     
     def spatial_cross_validation(self,tiles,use_adjusted=True,max_k=500,n_cores=1):
         """
