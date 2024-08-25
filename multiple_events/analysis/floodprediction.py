@@ -11,7 +11,7 @@ import scipy.stats as stats
 from itertools import product
 import time
 
-def huber_loss(y_true,y_pred,delta=30000):
+def huber_loss(y_true,y_pred,delta=20000):
     """
     Loss function that's robust to outliers.
     For errors < delta, acts like MSE.
@@ -1169,8 +1169,8 @@ class FloodEvent:
             
             if len(test_df) > 0:
             
-                predictions = cv_fold(i,train_df,test_df,self.response_variable,self.features,select_features=False,hyperparams=(self.presence_hyperparams,self.cost_hyperparams),n_cores=n_cores)            
-            predictions_list.append(predictions)
+                predictions = cv_fold(i,train_df,test_df,self.response_variable,self.features,select_features=False,hyperparams=(self.presence_hyperparams,self.cost_hyperparams),n_cores=n_cores)
+                predictions_list.append(predictions)
             
             t2 = time.time()
             
