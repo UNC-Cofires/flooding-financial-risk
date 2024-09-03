@@ -89,7 +89,7 @@ print(f'#---------- {county_name} ----------#\n',flush=True)
 ### *** DAMAGE EXPOSURE DATA *** ###
 
 # Read in data on damage exposure of single family homes in county
-damage_dir = os.path.join(pwd,'2024-03-06_damage_estimates_by_county')
+damage_dir = os.path.join(pwd,'2024-08-25_damage_estimates_by_county')
 
 properties_path = os.path.join(damage_dir,county_name,f'{county_name}_homes.parquet')
 properties = pq.read_table(properties_path,use_pandas_metadata=True).to_pandas()
@@ -153,7 +153,7 @@ pv_timeseries['period'] = pd.to_datetime(pv_timeseries['period']).dt.to_period('
 ### *** MORTGAGE ORIGINATION DATA *** ###
 
 # Read in data on mortgage originations
-originations_dir = os.path.join(pwd,'2024-04-01_distributions')
+originations_dir = os.path.join(pwd,'2024-07-19_distributions')
 originations_path = os.path.join(originations_dir,'hmda_mortgage_originations.csv')
 originations = pd.read_csv(originations_path,index_col=0,dtype={'county_code':str,'census_tract':str})
 originations = originations.rename(columns={'census_tract':'censusTract','county_code':'countyCode','census_year':'censusYear'})
@@ -480,7 +480,10 @@ for i,origination in enumerate(originations.to_dict(orient='records')):
 
     # Exclude properties that would give us LTV > 100% at origination
     potential_property_values['oLTV'] = loan_amount/potential_property_values['property_value']
-    potential_property_values = potential_property_values[potential_property_values['oLTV'] <= 1.0]
+    min_oLTV = depmod.marginals['oLTV'].ppf(0)
+    max_oLTV = depmod.marginals['oLTV'].ppf(1)
+    oLTV_mask = (potential_property_values['oLTV'] >= min_oLTV)&(potential_property_values['oLTV'] <= max_oLTV)
+    potential_property_values = potential_property_values[oLTV_mask]
     
     if len(potential_property_values) == 0:
         success = False
@@ -506,7 +509,8 @@ for i,origination in enumerate(originations.to_dict(orient='records')):
 
         # During the periods for which the was being repaid, mark the property as occupied so that we 
         # don't end up with multiple overlapping mortgages on the same property
-        m = (property_availability['building_id']==B.building_id)&(property_availability['period'].isin(B.periods))
+        
+        m = (property_availability['building_id']==B.building_id)&(property_availability['period'] >= B.periods[0])&(property_availability['period'] <= B.periods[-1])
         property_availability = property_availability[~m]
         
     else:
