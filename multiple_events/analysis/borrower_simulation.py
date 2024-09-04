@@ -10,6 +10,7 @@ import mortgage_model as mm
 from copy import deepcopy
 import pickle
 import os
+import sys
 import time
 
 ### *** HELPER FUNCTIONS *** ###
@@ -45,11 +46,22 @@ def format_elapsed_time(seconds):
 # Get index of county to simulate
 county_idx = int(os.environ['SLURM_ARRAY_TASK_ID'])
 
+# Read in command-line arguments
+replication_number = int(sys.argv[1])
+damage_cost_multiplier = float(sys.argv[2])
+property_value_multiplier = float(sys.argv[3])
+repair_rate_multiplier = float(sys.argv[4])
+
+if damage_cost_multiplier == property_value_multiplier == repair_rate_multiplier == 1:
+    suffix = 'base_case'
+else:
+    suffix = f'DC_{damage_cost_multiplier:.2f}_PV_{property_value_multiplier:.2f}_RR_{repair_rate_multiplier:.2f}'
+
 # Specify current working directory
 pwd = os.getcwd()
 
 # Specify output directory for model runs
-outfolder = os.path.join(pwd,'mortgage_borrower_simulation')
+outfolder = os.path.join(pwd,f'mortgage_borrower_simulation_{suffix}/replicate_{replication_number}')
 if not os.path.exists(outfolder):
     os.makedirs(outfolder,exist_ok=True)
     
@@ -112,6 +124,10 @@ n_drop = np.sum(~m)
 properties = properties[m]
 print(f'Dropped {n_drop} / {n_prop} ({np.round(100*n_drop/n_prop,3)}%) properties.',flush=True)
 
+# Save to file
+outname = os.path.join(county_folder,f'{county_name}_properties.parquet')
+properties.to_parquet(outname)
+
 # Property values were estimated on a quarterly basis
 # Interpolate the estimated values to be on a monthly basis
 # (This step can take awhile if the number of buildings is large)
@@ -163,7 +179,8 @@ originations = originations[originations['countyCode']==county_code].reset_index
 originations['month'] = np.random.randint(1,12+1,size=len(originations))
 originations['period'] = originations['year'].astype(str) + '-' + originations['month'].apply(lambda x: '{:02d}'.format(x))
 originations['period'] = pd.to_datetime(originations['period']).dt.to_period(freq='M')
-originations = originations[['period','state','countyCode','censusTract','censusYear','loan_purpose','loan_amount','income']]
+originations['year'] = originations['period'].dt.year
+originations = originations[['period','year','state','countyCode','censusTract','censusYear','loan_purpose','loan_amount','income']]
 originations = originations[originations['period'].isin(periods)]
 originations = originations.sort_values(by='period').reset_index(drop=True)
 
@@ -271,8 +288,7 @@ market_rates = market_rates.set_index('period')
 # Specify interest rates on home repair loans / disaster recovery loans
 # In the base case, assume equal to the average 30-year fixed mortgage rate
 # In sensitivity analysis, assume equal to 50% of average 30-year fixed rate, since this approximates the SBA's below-market rate
-# Assume that borrowers pay 50% of the market rate, since this roughly follows the SBA's below-market rate
-repair_rate = market_rates[f'MORTGAGE30US']
+repair_rate = repair_rate_multiplier*market_rates[f'MORTGAGE30US']
 
 ### *** INCOME GROWTH DATA *** ###
 
@@ -384,152 +400,168 @@ n_drop = int(np.sum(mask))
 p_drop = n_drop/len(mask)
 print(f'Dropped {n_drop} / {len(mask)} ({np.round(p_drop*100,3)}%) loans due to poor characterization of key financial variables.\n',flush=True)
 
-# Create a unique loan id for each origination consisting of county code and index of loan
-originations['loan_id'] = originations['countyCode'] + '-' + originations.index.values.astype(str)
+# Create a unique loan id for each origination consisting of county code, year, index of loan in that year
+originations['loan_id'] = originations['countyCode'] + '-' + originations['year'].astype(str) + '-'
+originations['loan_id'] += originations.groupby('loan_id').cumcount().astype(str)
+
+### *** IF APPLICABLE, RESUME SIMULATION WHERE PREVIOUS RUN LEFT OFF *** ###
+
+output_files = [x for x in os.listdir(county_folder) if 'simulation_output' in x]
+output_files.sort()
+
+if len(output_files) > 0:
+    start_origination_year = 1 + int(output_files[-1].split('_')[-1].strip('.parquet'))
+    
+    # Read in record of building occupancy from last simulation snapshot
+    # We'll use this to ensure we don't assign multiple concurrent loans to the same property
+    property_availability_path = os.path.join(county_folder,f'{county_name}_property_availability.parquet')
+    property_availability = pq.read_table(property_availability_path,use_pandas_metadata=True).to_pandas()
+else:
+    start_origination_year = originations['year'].min()
+    property_availability = pv_timeseries.copy()
+    
+end_origination_year = originations['year'].max()
+origination_years = np.arange(start_origination_year,end_origination_year+1)
+
 
 ### *** PERFORM DYNAMIC SIMULATION OF MORTGAGE BORROWER FINANCES WITHIN COUNTY *** ###
 
 print('Simulating borrower financial conditions over time.',flush=True)
 
-n_borrowers = len(originations)
-
-# Create copy of building occupancy / property value over time
-# We'll use this when assigning loans to specific properties
-property_availability = pv_timeseries.copy()
-
-summary_list = []
-failed_loans = []
-
-# Print progress in 5% increments
-print_indices = np.ceil(np.linspace(0,n_borrowers-1,20+1)).astype(int)
-print_indices = print_indices[print_indices > 0]
 t0 = time.time()
-t1 = time.time()
 
-for i,origination in enumerate(originations.to_dict(orient='records')):
+for origination_year in origination_years:
     
-    if i in print_indices:
-        
-        percent_complete = int(np.round(100*(i+1)/n_borrowers))
-        
-        t2 = time.time()
-        
-        elapsed_time = format_elapsed_time(t2-t1)
-        cumulative_elapsed_time = format_elapsed_time(t2-t0)
-        
-        t1 = time.time()
-        
-        progress = f'    {i+1} / {n_borrowers} ({percent_complete}%) complete. '
-        progress += f'Time elapsed: {elapsed_time} last iteration / {cumulative_elapsed_time} cumulative.'
-        
-        print(progress,flush=True)
+    current_year_originations = originations[originations['year']==origination_year]
+    summary_list = []
+    failed_loans = []
+    
+    t1 = time.time()
 
-    loan_id = origination['loan_id']
-    origination_period = origination['period']
-    origination_year = origination_period.year
-    income = origination['income']
-    loan_purpose = origination['loan_purpose']
-    loan_amount = origination['loan_amount']
-    loan_term = origination['loan_term']
+    for origination in current_year_originations.to_dict(orient='records'):
 
-    geography_type = 'censusTract_' + str(origination['censusYear'])
-    geographic_unit = origination['censusTract']
+        loan_id = origination['loan_id']
+        origination_period = origination['period']
+        income = origination['income']
+        loan_purpose = origination['loan_purpose']
+        loan_amount = origination['loan_amount']
+        loan_term = origination['loan_term']
 
-    # Select appropriate benchmark market rate
-    loan_years = int(loan_term/12)
-    market_rate = market_rates[f'MORTGAGE{loan_years}US']
+        geography_type = 'censusTract_' + str(origination['censusYear'])
+        geographic_unit = origination['censusTract']
 
-    # Select appropriate monthly prepayment hazard function
-    monthly_prepayment_prob = prepayment_profiles[f'{loan_purpose}{loan_years}']
+        # Select appropriate benchmark market rate
+        loan_years = int(loan_term/12)
+        market_rate = market_rates[f'MORTGAGE{loan_years}US']
 
-    # Simulate DTI and rate spread at origination conditional on loan amount and income
-    known_values = np.array([[income,loan_amount,np.nan,np.nan,np.nan,np.nan]])
-    depmod = jointdist_by_year[origination_year][f'{loan_purpose}{loan_years}']
+        # Select appropriate monthly prepayment hazard function
+        monthly_prepayment_prob = prepayment_profiles[f'{loan_purpose}{loan_years}']
 
-    # Because we simulate DTI and interest rate from a guassian copula, it is 
-    # theoretically possible to end up with a DTI at origination that is less than the ratio
-    # of the monthly mortgage payment / monthly income (which makes no sense). 
-    # This happens extremely rarely, but if it does, try to redraw values up to 10 times. 
-    # If it still doesn't work, discard the mortgage from the simulation. 
+        # Simulate DTI and rate spread at origination conditional on loan amount and income
+        known_values = np.array([[income,loan_amount,np.nan,np.nan,np.nan,np.nan]])
+        depmod = jointdist_by_year[origination_year][f'{loan_purpose}{loan_years}']
 
-    keepgoing = True
-    n_draws = 0
+        # Because we simulate DTI and interest rate from a guassian copula, it is 
+        # theoretically possible to end up with a DTI at origination that is less than the ratio
+        # of the monthly mortgage payment / monthly income (which makes no sense). 
+        # This happens extremely rarely, but if it does, try to redraw values up to 10 times. 
+        # If it still doesn't work, discard the mortgage from the simulation. 
 
-    while keepgoing:
+        keepgoing = True
+        n_draws = 0
 
-        income,loan_amount,extra,oDTI,credit_score,rate_spread = depmod.conditional_simulation(known_values)[0]
-        interest_rate = market_rate[origination_period] + rate_spread
-        monthly_payment = mm.monthly_payment(interest_rate,loan_term,loan_amount)
-        monthly_income = income/12
+        while keepgoing:
 
-        n_draws += 1
+            income,loan_amount,extra,oDTI,credit_score,rate_spread = depmod.conditional_simulation(known_values)[0]
+            interest_rate = market_rate[origination_period] + rate_spread
+            monthly_payment = mm.monthly_payment(interest_rate,loan_term,loan_amount)
+            monthly_income = income/12
 
-        if monthly_payment/monthly_income <= oDTI:
-            keepgoing = False
-            success = True
-        elif n_draws >= 10:
-            keepgoing = False
+            n_draws += 1
+
+            if monthly_payment/monthly_income <= oDTI:
+                keepgoing = False
+                success = True
+            elif n_draws >= 10:
+                keepgoing = False
+                success = False
+
+        # Assign mortgage to a specific property within census tract
+        # We'll do this randomly, but use information on the joint distribution of LTV, rate spread, etc. 
+        # to select a property that will give us a realistic LTV at origination
+        potential_building_ids = properties[properties[geography_type]==geographic_unit]['building_id']
+        potential_property_values = property_availability[property_availability['period']==origination_period]
+        potential_property_values = potential_property_values[potential_property_values['building_id'].isin(potential_building_ids)]
+
+        # Exclude properties that would give us LTV > 100% at origination
+        potential_property_values['oLTV'] = loan_amount/potential_property_values['property_value']
+        min_oLTV = depmod.marginals['oLTV'].ppf(0)
+        max_oLTV = depmod.marginals['oLTV'].ppf(1)
+        oLTV_mask = (potential_property_values['oLTV'] >= min_oLTV)&(potential_property_values['oLTV'] <= max_oLTV)
+        potential_property_values = potential_property_values[oLTV_mask]
+
+        if len(potential_property_values) == 0:
             success = False
+
+        if success:
+
+            # Calculate probability mass associated with potential properties (which differ in terms of LTV at origination) 
+            potential_property_values['prob'] = depmod.marginals['oLTV'].pdf(potential_property_values['oLTV'].to_numpy())
+            potential_property_values['prob'] = potential_property_values['prob']/potential_property_values['prob'].sum()
+            potential_property_values['prob'] = np.minimum(np.maximum(potential_property_values['prob'].fillna(0),0),1)
+            potential_property_values['prob'] = potential_property_values['prob']/potential_property_values['prob'].sum()
+
+            # Randomly select property according to probability mass
+            building_id = np.random.choice(potential_property_values['building_id'].to_numpy(),p=potential_property_values['prob'].to_numpy())
             
-    # Assign mortgage to a specific property within census tract
-    # We'll do this randomly, but use information on the joint distribution of LTV, rate spread, etc. 
-    # to select a property that will give us a realistic LTV at origination
-    potential_building_ids = properties[properties[geography_type]==geographic_unit]['building_id']
-    potential_property_values = property_availability[property_availability['period']==origination_period]
-    potential_property_values = potential_property_values[potential_property_values['building_id'].isin(potential_building_ids)]
+            # Get property value and damage exposure timeseries for selected property
+            property_value = property_value_multiplier*pv_timeseries[pv_timeseries['building_id']==building_id].set_index('period')['property_value']
+            property_damage_exposure = damage_cost_multiplier*damage_exposure[damage_exposure['building_id']==building_id].set_index('period').drop(columns='building_id')
 
-    # Exclude properties that would give us LTV > 100% at origination
-    potential_property_values['oLTV'] = loan_amount/potential_property_values['property_value']
-    min_oLTV = depmod.marginals['oLTV'].ppf(0)
-    max_oLTV = depmod.marginals['oLTV'].ppf(1)
-    oLTV_mask = (potential_property_values['oLTV'] >= min_oLTV)&(potential_property_values['oLTV'] <= max_oLTV)
-    potential_property_values = potential_property_values[oLTV_mask]
+            # Initialize borrower class and simulate repayment
+            B = mm.MortgageBorrower(loan_id,building_id,origination_period,loan_purpose,loan_amount,loan_term,interest_rate,income,oDTI,credit_score)
+            B.initialize_state_variables(property_value,market_rate,repair_rate,income_growth,property_damage_exposure,end_period=end_period)
+            B.simulate_repayment(monthly_prepayment_prob)
+            summary_list.append(B.summarize())
+
+            # During the periods for which the was being repaid, mark the property as occupied so that we 
+            # don't end up with multiple overlapping mortgages on the same property
+
+            m = (property_availability['building_id']==B.building_id)&(property_availability['period'] >= B.periods[0])&(property_availability['period'] <= B.periods[-1])
+            property_availability = property_availability[~m]
+
+        else:
+            failed_loans.append(loan_id)
+
+    summary = pd.concat(summary_list).reset_index(drop=True)
+
+    ### *** SAVE RESULTS *** ###
     
-    if len(potential_property_values) == 0:
-        success = False
-        
-    if success:
-        
-        # Calculate probability mass associated with potential properties (which differ in terms of LTV at origination) 
-        potential_property_values['prob'] = depmod.marginals['oLTV'].pdf(potential_property_values['oLTV'].to_numpy())
-        potential_property_values['prob'] = potential_property_values['prob']/potential_property_values['prob'].sum()
-        potential_property_values['prob'] = np.minimum(np.maximum(potential_property_values['prob'].fillna(0),0),1)
-        potential_property_values['prob'] = potential_property_values['prob']/potential_property_values['prob'].sum()
+    # Save current state of building occupancy so that it can be resumed later
+    outname = os.path.join(county_folder,f'{county_name}_property_availability.parquet')
+    property_availability.to_parquet(outname)
 
-        # Randomly select property according to probability mass
-        building_id = np.random.choice(potential_property_values['building_id'].to_numpy(),p=potential_property_values['prob'].to_numpy())
-        property_value = pv_timeseries[pv_timeseries['building_id']==building_id].set_index('period')['property_value']
-        property_damage_exposure = damage_exposure[damage_exposure['building_id']==building_id].set_index('period').drop(columns='building_id')
+    outname = os.path.join(county_folder,f'{county_name}_originations_{origination_year}.parquet')
+    current_year_originations.to_parquet(outname)
 
-        # Initialize borrower class and simulate repayment
-        B = mm.MortgageBorrower(loan_id,building_id,origination_period,loan_purpose,loan_amount,loan_term,interest_rate,income,oDTI,credit_score)
-        B.initialize_state_variables(property_value,market_rate,repair_rate,income_growth,property_damage_exposure,end_period=end_period)
-        B.simulate_repayment(monthly_prepayment_prob)
-        summary_list.append(B.summarize())
+    outname = os.path.join(county_folder,f'{county_name}_simulation_output_{origination_year}.parquet')
+    summary.to_parquet(outname)
 
-        # During the periods for which the was being repaid, mark the property as occupied so that we 
-        # don't end up with multiple overlapping mortgages on the same property
-        
-        m = (property_availability['building_id']==B.building_id)&(property_availability['period'] >= B.periods[0])&(property_availability['period'] <= B.periods[-1])
-        property_availability = property_availability[~m]
-        
-    else:
-        failed_loans.append(loan_id)
-        
+    outname = os.path.join(county_folder,f'{county_name}_failed_loans_{origination_year}.csv')
+    failed_loan_df = pd.DataFrame({'loan_id':np.array(failed_loans)})
+    failed_loan_df.to_csv(outname,index=False)
+    
+    ### *** PRINT UPDATE *** ###
+    
+    t2 = time.time()
+    
+    elapsed_time = format_elapsed_time(t2-t1)
+    cumulative_elapsed_time = format_elapsed_time(t2-t0)
+    
+    n_current = len(current_year_originations)
+    p_current = np.round(100*n_current/len(originations),1)
 
-summary = pd.concat(summary_list).reset_index(drop=True)
+    progress = f'    Simulated {n_current} mortgages originated in {origination_year} ({p_current}% of total).'
+    progress += f'Time elapsed: {elapsed_time} last iteration / {cumulative_elapsed_time} cumulative.'
 
-### *** SAVE RESULTS *** ###
-
-outname = os.path.join(county_folder,f'{county_name}_originations.parquet')
-originations.to_parquet(outname)
-
-outname = os.path.join(county_folder,f'{county_name}_properties.parquet')
-properties.to_parquet(outname)
-
-outname = os.path.join(county_folder,f'{county_name}_simulation_output.parquet')
-summary.to_parquet(outname)
-
-outname = os.path.join(county_folder,f'{county_name}_failed_loans.csv')
-failed_loan_df = pd.DataFrame({'loan_id':np.array(failed_loans)})
-failed_loan_df.to_csv(outname,index=False)
+    print(progress,flush=True)
