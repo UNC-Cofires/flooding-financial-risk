@@ -1056,7 +1056,8 @@ class FloodEvent:
         insured_df = insured_df[insured_df['study_area']==1]
         insured_df['flood_damage_prob'] = insured_df['flood_damage_class']
         insured_df['insured'] = 1
-        uninsured_df = self.target_dataset[['building_id','study_area','geometry','flood_damage_prob','flood_damage_class','total_cost'] + stratification_columns]
+        uninsured_df = self.target_dataset[['building_id','study_area','geometry','flood_damage_prob','flood_damage_class','total_cost_pred'] + stratification_columns].rename(columns={'total_cost_pred':'total_cost'})
+        
         uninsured_df = uninsured_df[uninsured_df['study_area']==1]
         uninsured_df['insured'] = 0
         combined_df = pd.concat([insured_df,uninsured_df]).reset_index(drop=True)
