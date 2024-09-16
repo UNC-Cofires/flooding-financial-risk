@@ -101,7 +101,7 @@ print(f'#---------- {county_name} ----------#\n',flush=True)
 ### *** DAMAGE EXPOSURE DATA *** ###
 
 # Read in data on damage exposure of single family homes in county
-damage_dir = os.path.join(pwd,'2024-08-25_damage_estimates_by_county')
+damage_dir = os.path.join(pwd,'2024-09-11_damage_estimates_by_county')
 
 properties_path = os.path.join(damage_dir,county_name,f'{county_name}_homes.parquet')
 properties = pq.read_table(properties_path,use_pandas_metadata=True).to_pandas()

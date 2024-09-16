@@ -13,7 +13,7 @@ import floodprediction as fp
 pwd = os.getcwd()
 
 # Spcify path to directory containing flood event objects
-damage_dir = os.path.join(pwd,'2024-08-25_damage_estimates')
+damage_dir = os.path.join(pwd,'2024-09-11_damage_estimates')
 
 # Specify output directory for processed property-value estimates
 outfolder = damage_dir + '_by_county'
