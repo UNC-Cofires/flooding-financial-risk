@@ -532,24 +532,26 @@ for origination_year in origination_years:
 
         else:
             failed_loans.append(loan_id)
-
-    summary = pd.concat(summary_list).reset_index(drop=True)
-
+            
     ### *** SAVE RESULTS *** ###
     
-    # Save current state of building occupancy so that it can be resumed later
-    outname = os.path.join(county_folder,f'{county_name}_property_availability.parquet')
-    property_availability.to_parquet(outname)
+    if len(summary_list) > 0:
 
-    outname = os.path.join(county_folder,f'{county_name}_originations_{origination_year}.parquet')
-    current_year_originations.to_parquet(outname)
+        summary = pd.concat(summary_list).reset_index(drop=True)
 
-    outname = os.path.join(county_folder,f'{county_name}_simulation_output_{origination_year}.parquet')
-    summary.to_parquet(outname)
+        # Save current state of building occupancy so that it can be resumed later
+        outname = os.path.join(county_folder,f'{county_name}_property_availability.parquet')
+        property_availability.to_parquet(outname)
 
-    outname = os.path.join(county_folder,f'{county_name}_failed_loans_{origination_year}.csv')
-    failed_loan_df = pd.DataFrame({'loan_id':np.array(failed_loans)})
-    failed_loan_df.to_csv(outname,index=False)
+        outname = os.path.join(county_folder,f'{county_name}_originations_{origination_year}.parquet')
+        current_year_originations.to_parquet(outname)
+
+        outname = os.path.join(county_folder,f'{county_name}_simulation_output_{origination_year}.parquet')
+        summary.to_parquet(outname)
+
+        outname = os.path.join(county_folder,f'{county_name}_failed_loans_{origination_year}.csv')
+        failed_loan_df = pd.DataFrame({'loan_id':np.array(failed_loans)})
+        failed_loan_df.to_csv(outname,index=False)
     
     ### *** PRINT UPDATE *** ###
     
