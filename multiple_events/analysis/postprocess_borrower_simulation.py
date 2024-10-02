@@ -31,9 +31,105 @@ def kaplan_meier(time,event,t_max=360):
     
     return(S,tvals)
 
+def damage_df_generator(mortgage_sim_dir,complete_counties,replicates):
+    """
+    Generator that loops over county-level simulations that yields information on borrowers with flood damage. 
+    """
+    
+    for county in complete_counties:
+        for replicate in replicates:
+
+            print(f'Damage - {county}: replicate {replicate}',flush=True)
+
+            sim_dir = os.path.join(mortgage_sim_dir,f'replicate_{replicate}/{county}')
+
+            sim_files = np.sort([x for x in os.listdir(sim_dir) if 'simulation_output' in x])
+            sim_filepaths = [os.path.join(sim_dir,file) for file in sim_files]
+
+            for filepath in sim_filepaths:
+
+                sim_df = pd.read_parquet(filepath)
+
+                sim_columns = list(sim_df.columns)
+
+                sim_df['county'] = county
+                sim_df['replicate'] = replicate
+
+                sim_df = sim_df[['county','replicate'] + sim_columns]
+
+                # Get snapshot of borrower finances at time of flood damage exposure
+                m = (sim_df['insured_damage'] + sim_df['uninsured_damage'] > 0)
+                damage_df = sim_df[m]
+                
+                yield damage_df
+                                
+def quantile_df_generator(mortgage_sim_dir,complete_counties,replicates):
+    """
+    Generator that loops over county-level simulations that yields information on distribution of property values and income over time. 
+    """
+    
+    for county in complete_counties:
+        for replicate in replicates:
+
+            print(f'Quantiles - {county}: replicate {replicate}',flush=True)
+
+            sim_dir = os.path.join(mortgage_sim_dir,f'replicate_{replicate}/{county}')
+
+            sim_files = np.sort([x for x in os.listdir(sim_dir) if 'simulation_output' in x])
+            sim_filepaths = [os.path.join(sim_dir,file) for file in sim_files]
+
+            for filepath in sim_filepaths:
+
+                sim_df = pd.read_parquet(filepath)
+
+                sim_columns = list(sim_df.columns)
+
+                sim_df['county'] = county
+                sim_df['replicate'] = replicate
+
+                sim_df = sim_df[['county','replicate'] + sim_columns]
+                
+                # Get data needed to calculate time-varying borrower income and property value quintiles
+                quantile_df = sim_df[['period','monthly_income','property_value']]
+
+                yield quantile_df
+                                
+def futime_df_generator(mortgage_sim_dir,complete_counties,replicates):
+    """
+    Generator that loops over county-level simulations that yields time to mortgage repayment. 
+    """
+    
+    for county in complete_counties:
+        for replicate in replicates:
+
+            print(f'Follow-up time - {county}: replicate {replicate}',flush=True)
+
+            sim_dir = os.path.join(mortgage_sim_dir,f'replicate_{replicate}/{county}')
+
+            sim_files = np.sort([x for x in os.listdir(sim_dir) if 'simulation_output' in x])
+            sim_filepaths = [os.path.join(sim_dir,file) for file in sim_files]
+
+            for filepath in sim_filepaths:
+
+                sim_df = pd.read_parquet(filepath)
+
+                sim_columns = list(sim_df.columns)
+
+                sim_df['county'] = county
+                sim_df['replicate'] = replicate
+
+                sim_df = sim_df[['county','replicate'] + sim_columns]
+                
+                # Get data needed to construct loan survival curves
+                futime_df = sim_df[['loan_id','loan_purpose','loan_term','loan_age','termination_code']].groupby('loan_id').last().reset_index()
+                futime_df = futime_df.drop(columns='loan_id').rename(columns={'loan_age':'time','termination_code':'event'})
+                futime_df['event'] = (~futime_df['event'].isna()).astype(int)
+
+                yield futime_df
+                
 ### *** MAIN *** ###
 
-# Set up folders 
+# Set up folders
 pwd = os.getcwd()
 
 mortgage_sim_dir = '/proj/characklab/flooddata/NC/multiple_events/analysis/mortgage_borrower_simulation_base_case'
@@ -66,60 +162,16 @@ print('Missing counties:',', '.join(incomplete_counties),flush=True)
             
 complete_counties = counties['countyName'][~counties['countyName'].isin(incomplete_counties)].to_list()
 
-damage_df_list = []
-quantile_df_list = []
-futime_df_list = []
-
-for county in complete_counties:
-    for replicate in replicates:
-        
-        print(f'{county}: replicate {replicate}',flush=True)
-        
-        sim_dir = os.path.join(mortgage_sim_dir,f'replicate_{replicate}/{county}')
-        
-        sim_files = np.sort([x for x in os.listdir(sim_dir) if 'simulation_output' in x])
-        sim_filepaths = [os.path.join(sim_dir,file) for file in sim_files]
-        
-        for filepath in sim_filepaths:
-            
-            sim_df = pd.read_parquet(filepath)
-            
-            sim_columns = list(sim_df.columns)
-            
-            sim_df['county'] = county
-            sim_df['replicate'] = replicate
-            
-            sim_df = sim_df[['county','replicate'] + sim_columns]
-            
-            # Get snapshot of borrower finances at time of flood damage exposure
-            m = (sim_df['insured_damage'] + sim_df['uninsured_damage'] > 0)
-            damage_df = sim_df[m]
-            
-            # Get data needed to calculate time-varying borrower income and property value quintiles
-            quantile_df = sim_df[['period','monthly_income','property_value']]
-            
-            # Get data needed to construct loan survival curves
-            futime_df = sim_df[['loan_id','loan_purpose','loan_term','loan_age','termination_code']].groupby('loan_id').last().reset_index()
-            futime_df = futime_df.drop(columns='loan_id').rename(columns={'loan_age':'time','termination_code':'event'})
-            futime_df['event'] = (~futime_df['event'].isna()).astype(int)
-            
-            # Append to list
-            damage_df_list.append(damage_df)
-            quantile_df_list.append(quantile_df)
-            futime_df_list.append(futime_df)
-    
-    gc.collect()
-    
-# Concatenate county-level data
-damage_df = pd.concat(damage_df_list).reset_index(drop=True)
-quantile_df = pd.concat(quantile_df_list).reset_index(drop=True)
-futime_df = pd.concat(futime_df_list).reset_index(drop=True)
-
 # Save detailed results for flood-damaged properties
+damage_df = pd.concat(damage_df_generator(mortgage_sim_dir,complete_counties,replicates))
 damaged_sim_outname = os.path.join(outfolder,'simulation_output_damaged.parquet')
 damage_df.to_parquet(damaged_sim_outname)
 
-# Get income and property value quintiles
+del damage_df # Free up RAM
+gc.collect()
+
+# Save info on time-varying income and property value quintiles
+quantile_df = pd.concat(quantile_df_generator(mortgage_sim_dir,complete_counties,replicates))
 quantile_df = quantile_df.groupby('period').quantile(np.arange(0.2,1,0.2)).reset_index().rename(columns={'level_1':'quantile'})
 
 income_quant_df = quantile_df.pivot(index='period',columns='quantile',values='monthly_income')
@@ -130,14 +182,22 @@ pv_quant_df = quantile_df.pivot(index='period',columns='quantile',values='proper
 pv_quant_df.columns = [f'P{int(100*x)}' for x in pv_quant_df.columns]
 pv_quant_df.to_csv(os.path.join(outfolder,'property_value_quantiles.csv'))
 
-# Construct Kaplan-Meier curves
-p30_futime = futime_df[(futime_df['loan_purpose']=='purchase')&(futime_df['loan_term']==360)]
-r30_futime = futime_df[(futime_df['loan_purpose']=='refinance')&(futime_df['loan_term']==360)]
-r15_futime = futime_df[(futime_df['loan_purpose']=='refinance')&(futime_df['loan_term']==180)]
+del quantile_df # Free up RAM
+gc.collect()
 
-p30_surv,p30_tvals = kaplan_meier(p30_futime['time'].to_numpy(),p30_futime['event'].to_numpy())
-r30_surv,r30_tvals = kaplan_meier(r30_futime['time'].to_numpy(),r30_futime['event'].to_numpy())
-r15_surv,r15_tvals = kaplan_meier(r15_futime['time'].to_numpy(),r15_futime['event'].to_numpy())
+# Construct Kaplan-Meier curves of loan survival
+futime_df = pd.concat(futime_df_generator(mortgage_sim_dir,complete_counties,replicates))
+
+p30_mask = (futime_df['loan_purpose']=='purchase')&(futime_df['loan_term']==360)
+r30_mask = (futime_df['loan_purpose']=='refinance')&(futime_df['loan_term']==360)
+r15_mask = (futime_df['loan_purpose']=='refinance')&(futime_df['loan_term']==180)
+
+p30_surv,p30_tvals = kaplan_meier(futime_df[p30_mask]['time'].to_numpy(),futime_df[p30_mask]['event'].to_numpy())
+r30_surv,r30_tvals = kaplan_meier(futime_df[r30_mask]['time'].to_numpy(),futime_df[r30_mask]['event'].to_numpy())
+r15_surv,r15_tvals = kaplan_meier(futime_df[r15_mask]['time'].to_numpy(),futime_df[r15_mask]['event'].to_numpy())
 
 surv_df = pd.DataFrame({'loan_age':p30_tvals,'p30_surv':p30_surv,'r30_surv':r30_surv,'r15_surv':r15_surv})
 surv_df.to_csv(os.path.join(outfolder,'simulated_survival.csv'),index=False)
+
+del futime_df # Free up RAM
+gc.collect()
