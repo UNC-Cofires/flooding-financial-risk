@@ -90,7 +90,7 @@ def quantile_df_generator(mortgage_sim_dir,complete_counties,replicates):
                 sim_df = sim_df[['county','replicate'] + sim_columns]
                 
                 # Get data needed to calculate time-varying borrower income and property value quintiles
-                quantile_df = sim_df[['period','monthly_income','property_value']]
+                quantile_df = sim_df[['replicate','county','period','monthly_income','property_value']]
 
                 yield quantile_df
                                 
@@ -170,8 +170,13 @@ damage_df.to_parquet(damaged_sim_outname)
 del damage_df # Free up RAM
 gc.collect()
 
-# Save info on time-varying income and property value quintiles
+# Get info on number of borrowers over time
 quantile_df = pd.concat(quantile_df_generator(mortgage_sim_dir,complete_counties,replicates))
+borrower_count_df = quantile_df[['replicate','county','period','property_value']].groupby(['replicate','county','period']).count().rename(columns={'property_value':'num_borrowers'}).reset_index()
+borrower_count_df.to_parquet(os.path.join(outfolder,'borrower_counts.parquet'))
+
+# Save info on time-varying income and property value quintiles
+quantile_df.drop(columns=['replicate','county'],inplace=True)
 quantile_df = quantile_df.groupby('period').quantile(np.arange(0.2,1,0.2)).reset_index().rename(columns={'level_1':'quantile'})
 
 income_quant_df = quantile_df.pivot(index='period',columns='quantile',values='monthly_income')
