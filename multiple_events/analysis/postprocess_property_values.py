@@ -144,7 +144,7 @@ for row in counties_to_process.to_dict(orient="records"):
         # Get kriged property value estimates for entries within county at different points in time
         periods = np.sort([x.split('_')[-1].replace('.parquet','') for x in os.listdir(group_dir) if 'kriged' in x])
 
-        usecols = ['building_id','parcel_id','countyCode','censusTract_1990','censusTract_2000','censusTract_2010','censusTract_2020','period','date','val_transfer_kriged']
+        usecols = ['building_id','parcel_id','countyCode','censusTract_1990','censusTract_2000','censusTract_2010','censusTract_2020','period','date','log_val_transfer_kriged','sigma_log_val_transfer_kriged','val_transfer_kriged']
 
         for period in periods:
 
