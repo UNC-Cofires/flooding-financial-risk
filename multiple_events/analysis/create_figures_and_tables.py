@@ -41,7 +41,6 @@ def money_label(x):
 
 study_area_counties = ['Alamance','Alexander','Alleghany','Anson','Ashe','Beaufort','Bertie','Bladen','Brunswick','Cabarrus','Caldwell','Camden','Carteret','Caswell','Chatham','Chowan','Columbus','Craven','Cumberland','Currituck','Dare','Davidson','Davie','Duplin','Durham','Edgecombe','Forsyth','Franklin','Gates','Granville','Greene','Guilford','Halifax','Harnett','Hertford','Hoke','Hyde','Iredell','Johnston','Jones','Lee','Lenoir','Martin','Mecklenburg','Montgomery','Moore','Nash','New Hanover','Northampton','Onslow','Orange','Pamlico','Pasquotank','Pender','Perquimans','Person','Pitt','Randolph','Richmond','Robeson','Rockingham','Rowan','Sampson','Scotland','Stanly','Stokes','Surry','Tyrrell','Union','Vance','Wake','Warren','Washington','Watauga','Wayne','Wilkes','Wilson','Yadkin']
 
-
 ### *** SET UP FOLDERS AND ENVIRONMENT *** ###
 
 # Specify current working directory
@@ -136,7 +135,6 @@ outname = os.path.join(outfolder,'Figure_S1_event_boundaries.png')
 fig.savefig(outname,dpi=400)
 
 fig.show()
-
 
 # Helper functions to calcualate cross-validation performance of Random-Forest model
 
@@ -244,6 +242,7 @@ cv_perf = pd.pivot(cv_perf,index=['event_year','event_name','cv_type','pseudo_ab
 
 outname = os.path.join(outfolder,'damage_prediction_cross_validation_performance.csv')
 cv_perf.to_csv(outname)
+
 
 # Helper function to create barplot of model performance metrics
 
@@ -534,7 +533,6 @@ print('Number of included policies:',n_total_policies,flush=True)
 print('Number of OpenFEMA claims in NC, 1996-2019:',n_openfema_claims,flush=True)
 
 
-
 ### *** Figure S6 *** ###
 
 ## Property value estimation cross-validation error
@@ -555,10 +553,10 @@ for county in study_area_counties:
 cv_df = pd.concat(cv_list).reset_index(drop=True)
 cv_df['year'] = cv_df['date_transfer'].dt.year
 
-# Denote lowest 5% of property value transactions in each year
+# Denote lowest 10% of property value transactions in each year
+# (These might be intrafamily transfers or other transcations that are unlikely reflect fair market valuations) 
 low_pv_transactions = cv_df[['val_transfer','year']].groupby('year').quantile(0.1).reset_index().rename(columns={'val_transfer':'P10_val_transfer'})
 cv_df = pd.merge(cv_df,low_pv_transactions,on='year',how='left')
-
 
 
 # Get distirbution of relative error
@@ -620,7 +618,6 @@ print(np.round(100*d2.cdf(0.2)),'within 20%')
 print(np.round(100*d2.cdf(0.5)),'within 50%')
 
 
-
 ### *** FIGURE S7 *** ###
 years = np.arange(1990,2019+1)
 
@@ -644,17 +641,21 @@ ax.set_ylim(0,ymax)
 ax2 = ax.twinx()
 ax2.set_yticks(yticks)
 ax2.set_yticks(yticks)
-ax2.set_yticklabels(yticklabels,color='C0',alpha=0.75)
+ax2.set_yticklabels(yticklabels,color='C0',alpha=1)
 ax2.set_ylim(0,ymax)
 
-ax2.set_ylabel('Median sale price, USD',color='C0',alpha=0.75)
+ax2.set_ylabel('Median sale price, USD',color='C0',alpha=1)
 
 ax.set_ylabel('Absolute error, USD')
 
 xpos = np.arange(len(years))+1
 median_sale_price = cv_df[['val_transfer','year']].groupby('year').median()['val_transfer'].to_numpy()
+median_simulated_price = cv_df[['val_transfer_kriged','year']].groupby('year').median()['val_transfer_kriged'].to_numpy()
 
-ax.plot(xpos,median_sale_price,color='C0',lw=2,linestyle='-',alpha=0.75,zorder=-2)
+ax.plot(xpos,median_sale_price,color='C0',lw=2,linestyle='-',alpha=1,zorder=-2,label='Median observed sale price')
+ax.plot(xpos,median_simulated_price,color='C3',lw=2,linestyle='-.',alpha=1,zorder=-2,label='Median predicted sale price')
+
+ax.legend()
 
 fig.tight_layout()
 
@@ -662,7 +663,6 @@ outname = os.path.join(outfolder,'Figure_S7_property_value_error_by_year.png')
 fig.savefig(outname,dpi=400)
 
 fig.show()
-
 
 
 ### *** FIGURE S8 *** ###
@@ -726,7 +726,6 @@ pv_quantiles = pv_quantiles[['P0','P20','P40','P60','P80','P100']]
 pv_binning_function = lambda x: np.digitize(x['property_value'],bins=pv_quantiles.loc[x['period']].values)
 
 sim_df['property_value_group'] = sim_df.apply(pv_binning_function,axis=1)
-
 
 
 ### *** FIGURE S9 *** ###
@@ -801,8 +800,6 @@ fig.savefig(outname,dpi=400)
 
 fig.show()
 
-
-
 ### Read in post-processed data on damages
 
 filepath = '/proj/characklab/flooddata/NC/multiple_events/analysis/2024-09-11_damage_estimates_by_county/statewide_flood_damage_exposure.parquet'
@@ -833,8 +830,6 @@ exposure_df = pd.merge(exposure_df,floodzone_detail,how='left',on='building_id')
 exposure_df['dist_SFHA_category'] = pd.cut(exposure_df['dist_SFHA'],[-np.inf,0,250,np.inf],labels=['d <= 0','0 < d <= 250','d > 250'])
 
 
-
-
 # Get counts of buildings by county / SFHA / urban
 count_by_county = gpd.read_file('/proj/characklab/flooddata/NC/multiple_events/analysis/building_counts/counties')
 count_by_county_SFHA = pd.read_parquet('/proj/characklab/flooddata/NC/multiple_events/analysis/building_counts/count_by_county_SFHA.parquet')
@@ -853,7 +848,6 @@ count_by_CAMA = count_by_county_CAMA.drop(columns=['countyName','geometry']).gro
 
 count_by_CAMA_SFHA = structure_info[['CAMA','SFHA','building_id','single_family_detached']].groupby(['CAMA','SFHA']).agg({'building_id':'count','single_family_detached':'sum'}).reset_index()
 count_by_CAMA_SFHA = count_by_CAMA_SFHA.rename(columns={'building_id':'bldg_count','single_family_detached':'sf_count'})
-
 
 
 exposure_df['count_buildings_flooded'] = exposure_df['building_id']
@@ -936,7 +930,6 @@ exp_by_SFHA = pd.merge(exp_by_SFHA,count_by_SFHA[['SFHA','bldg_count']])
 exp_by_CAMA = pd.merge(exp_by_CAMA,count_by_CAMA[['CAMA','bldg_count']])
 exp_by_urban = pd.merge(exp_by_urban,count_by_urban[['urban','bldg_count']])
 exp_by_CAMA_SFHA = pd.merge(exp_by_CAMA_SFHA,count_by_CAMA_SFHA[['CAMA','SFHA','bldg_count']])
-
 
 exp_by_event.to_csv(os.path.join(outfolder,'exp_by_event.csv'),index=False)
 exp_by_event_county.to_csv(os.path.join(outfolder,'exp_by_event_county.csv'),index=False)
@@ -1030,7 +1023,7 @@ for i in range(len(xticks)):
 ax.set_xticks(xticks)
 ax.set_xticklabels(xticklabels)
 
-ax.set_ylabel('Flood damage exposure, billions USD')
+ax.set_ylabel('Flood damage cost, billions USD')
 
 ax.set_ylim([0,1.75])
 ax.set_yticks(np.arange(0,2,0.25))
@@ -1101,7 +1094,6 @@ UR = np.concatenate((UR_urban,UR_CAMA,UR_SFHA))
 IR = np.concatenate((IR_urban,IR_CAMA,IR_SFHA))
 INR = np.concatenate((INR_urban,INR_CAMA,INR_SFHA))
 
-
 U = UNR + UR
 I = INR + IR
 T = U+I
@@ -1130,7 +1122,7 @@ ax.set_yticklabels(yticklabels)
 
 ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.175),ncol=3,fontsize=8)
 
-ax.set_xlabel('Flood damage exposure, billions USD')
+ax.set_xlabel('Flood damage cost, billions USD')
 
 
 # PART II: NUMBER OF TIMES FLOODED
@@ -1220,6 +1212,7 @@ fig.savefig(outname,dpi=400)
 fig.show()
 
 
+
 ### *** FIGURE 5 PRE-PROCESSING *** ###
 
 hexagon_path = os.path.join(pwd,'building_counts/hexagons')
@@ -1288,6 +1281,8 @@ hydro = gpd.read_file(hydro_path).to_crs(crs)
 
 hydro = hydro[hydro.intersects(COG_domain)]
 hydro['geometry'] = hydro['geometry'].intersection(COG_domain)
+
+
 
 
 ### *** FIGURE 5: ANNUALIZED & CUMULATIVE COSTS *** ###
@@ -1391,6 +1386,7 @@ fig.savefig(outname,dpi=600,bbox_inches='tight')
 fig.show()
 
 
+
 ### FIGURE S10-S17 PRE-PROCESSING*** 
 
 exp_by_event_CAMA.set_index(['year','CAMA'],inplace=True)
@@ -1411,6 +1407,7 @@ norm1=mpl.colors.LogNorm(vmin=1, vmax=100)
 
 county_lw = 0.85
 hydro_lw = 0.25
+
 
 
 ### FIGURE S10 *** 
@@ -1605,7 +1602,6 @@ fig.savefig(outname,dpi=400)
 fig.show()
 
 
-
 ### FIGURE S12 *** 
 
 event_name = 'Floyd'
@@ -1796,6 +1792,7 @@ outname = os.path.join(outfolder,'Figure_S13_Isabel.png')
 fig.savefig(outname,dpi=400)
 
 fig.show()
+
 
 
 ### FIGURE S14 *** 
@@ -2166,6 +2163,9 @@ risk_by_loan_age_group = characterize_default_risk(uninsured_borrower_df,stratif
 risk_by_county = characterize_default_risk(uninsured_borrower_df,stratification_columns=['county'])
 
 
+damaged_sim_df.columns
+
+
 
 ### *** FIGURE 6 *** ###
 
@@ -2385,7 +2385,7 @@ default_df = uninsured_borrower_df[uninsured_borrower_df['real_shortfall'] > 0].
 ### *** FIGURE 7 PART I *** ###
 
 columns = ['strategic_only','double_trigger','cashflow_only']
-column_labels = ['Strategic only','Double-trigger','Cashflow only']
+column_labels = ['Collateral constrained only','Constrained by both','Income constrained only']
 colors = ['C3','C4','C0']
 
 n_replicates = 10
@@ -2426,7 +2426,7 @@ ax.tick_params(axis='both', which='major',width=1,length=6)
 ax.tick_params(axis='both', which='minor',width=1,length=3)
 
 ax.set_xlabel('Shortfall in funding for home repairs, USD')
-ax.set_ylabel('Number of mortgage borrowers\nat risk of flood-related default')
+ax.set_ylabel('Number of mortgage borrowers facing\nflood-related credit constraints')
 
 ax.legend()
 
@@ -2436,6 +2436,7 @@ outname = os.path.join(outfolder,'Figure_7_part_I_shortfall_distribution.png')
 fig.savefig(outname,dpi=400)
 
 fig.show()
+
 
 
 print(default_df['real_damage_cost'].quantile([0.25,0.5,0.75]).round(-2))
@@ -2536,13 +2537,14 @@ print('num_originations:',num_originations)
 print('percent_at_risk:',np.round(100*total/num_originations,2))
 
 
-
 ### *** FIGURE 8 *** ###
 
+
 xmax=3000
+pad=30
 
 columns = ['strategic_only','double_trigger','cashflow_only']
-column_labels = ['Strategic only','Double-trigger','Cashflow only']
+column_labels = ['Collateral constrained only','Constrained by both','Income constrained only']
 colors = ['C3','C4','C0']
 
 fig,axes = plt.subplots(nrows=3,ncols=1,figsize=(8,8))
@@ -2563,8 +2565,9 @@ ax.set_xlim([0,xmax])
 ax.set_yticks(yticks)
 ax.set_yticklabels(yticklabels)
 
-ax.set_xlabel('Number of mortgage borrowers at risk of flood-related default')
+ax.set_xlabel('Number of mortgage borrowers facing flood-related credit constraints')
 ax.set_ylabel('Income quintile',fontsize=12)
+
 
 ax.legend()
 
@@ -2584,8 +2587,9 @@ ax.set_xlim([0,xmax])
 ax.set_yticks(yticks)
 ax.set_yticklabels(yticklabels)
 
-ax.set_xlabel('Number of mortgage borrowers at risk of flood-related default')
+ax.set_xlabel('Number of mortgage borrowers facing flood-related credit constraints')
 ax.set_ylabel('Property value quintile',fontsize=12)
+
 
 ax = axes[2]
 
@@ -2603,8 +2607,9 @@ ax.set_xlim([0,xmax])
 ax.set_yticks(yticks)
 ax.set_yticklabels(yticklabels)
 
-ax.set_xlabel('Number of mortgage borrowers at risk of flood-related default')
+ax.set_xlabel('Number of mortgage borrowers facing flood-related credit constraints')
 ax.set_ylabel('Loan age',fontsize=12)
+
 
 # Add lettering
 letters = ['(a)','(b)','(c)']
@@ -2618,7 +2623,6 @@ outname = os.path.join(outfolder,'Figure_8_default_risk_by_group.png')
 fig.savefig(outname,dpi=400)
 
 fig.show()
-
 
 
 # Get overlap in buildings flooded between each event
@@ -2648,7 +2652,6 @@ for i,y1 in enumerate(years):
         
 df = pd.DataFrame(data={'y1':y1_list,'y2':y2_list,'n_overlap':n_overlap_list,'p_overlap':p_overlap_list})
 df.sort_values(by='p_overlap',ascending=False)
-
 
 
 ### *** FIGURE S17-S18 PRE-PROCESSING *** ###
@@ -2697,7 +2700,6 @@ outname = os.path.join(outfolder,'exp_by_event_pv_group.csv')
 exp_by_event_pv_group.to_csv(outname)
 
 
-
 ### *** FIGRURE S17 *** ###
 
 M = exp_by_event_pv_group.to_numpy().T
@@ -2740,8 +2742,6 @@ outname = os.path.join(outfolder,'Figure_S17_pv_group_share_of_damaged_propertie
 fig.savefig(outname)
 
 fig.show()
-
-
 
 
 ### *** FIGURE S18 *** ###
@@ -2813,12 +2813,10 @@ fig.show()
 
 
 
-
 m1 = relative_damage_df['property_value_group'].isin([1])
 m2 = relative_damage_df['year'].isin([1999,2016,2018])
 
 (relative_damage_df[m1&m2]['percent_damage'] > 90).mean()*100
-
 
 
 
@@ -2828,12 +2826,21 @@ agg_func = lambda x: len(np.unique(x))
 
 num_loans_exposed_to_flood_damage = damaged_sim_df[['replicate','loan_id']].groupby('replicate').agg(agg_func).mean().values[0]
 
+m = (damaged_sim_df['aLTV'] > 1.0)
+num_loans_exposed_to_flood_damage_with_negative_equity = damaged_sim_df[m][['replicate','loan_id']].groupby('replicate').agg(agg_func).mean().values[0]
+
 exposed_SFHA_building_ids = exposure_df[exposure_df['SFHA']==1]['building_id'].unique()
 m = (damaged_sim_df['building_id'].isin(exposed_SFHA_building_ids))
 num_SFHA_loans_exposed_to_flood_damage = damaged_sim_df[m][['replicate','loan_id']].groupby('replicate').agg(agg_func).mean().values[0]
+num_nonSFHA_loans_exposed_to_flood_damage = num_loans_exposed_to_flood_damage - num_SFHA_loans_exposed_to_flood_damage
 
 m = (damaged_sim_df['uninsured_damage'] > 0)
 num_loans_exposed_to_uninsured_damage = damaged_sim_df[m][['replicate','loan_id']].groupby('replicate').agg(agg_func).mean().values[0]
+
+damaged_sim_df['SFHA'] = damaged_sim_df['building_id'].isin(exposed_SFHA_building_ids).astype(int)
+m = (damaged_sim_df['uninsured_damage'] > 0)&(damaged_sim_df['SFHA']==1)
+num_SFHA_loans_exposed_to_uninsured_damage = damaged_sim_df[m][['replicate','loan_id']].groupby('replicate').agg(agg_func).mean().values[0]
+num_nonSFHA_loans_exposed_to_uninsured_damage = num_loans_exposed_to_uninsured_damage - num_SFHA_loans_exposed_to_uninsured_damage
 
 # Inflation adjust damages
 damaged_sim_df['real_insured_damage'] = damaged_sim_df['insured_damage']*damaged_sim_df['inflation_multiplier']
@@ -2864,6 +2871,11 @@ percent_aDTI_over_threshold = (100*(damaged_sim_df[m]['aDTI'] > 0.45).mean()).ro
 percent_both_over_threshold = (100*((damaged_sim_df[m]['aDTI'] > 0.45)&(damaged_sim_df[m]['aLTV'] > 1.0)).mean()).round()
 
 print(percent_aLTV_over_threshold,percent_aDTI_over_threshold,percent_both_over_threshold)
+
+
+
+num_loans_exposed_to_flood_damage_with_negative_equity/num_loans_exposed_to_flood_damage
+
 
 
 ### *** FIGURE S19: MULTI-WAY SENSITIVITY ANALYSIS *** ###
@@ -2939,7 +2951,7 @@ fig.show()
 xmax=3000
 
 columns = ['strategic_only','double_trigger','cashflow_only']
-column_labels = ['Strategic only','Double-trigger','Cashflow only']
+column_labels = ['Collateral constrained only','Constrained by both','Income constrained only']
 colors = ['C3','C4','C0']
 
 fig,ax = plt.subplots(nrows=1,ncols=1,figsize=(6,4))
@@ -2961,7 +2973,7 @@ ax.set_yticklabels(yticklabels)
 ax.set_xlabel('Number of mortgage borrowers at risk of flood-related default')
 ax.set_ylabel('Income quintile',fontsize=12)
 
-ax.legend(ncol=3,bbox_to_anchor=(1, 1.15), loc='upper right',columnspacing=1,handletextpad=0.5)
+ax.legend(ncol=1,bbox_to_anchor=(1, 1.15), loc='upper right',columnspacing=1,handletextpad=0.5)
 ax.axis('off')
 
 fig.tight_layout()
@@ -2974,7 +2986,7 @@ fig.show()
 ### *** FIGURE 9: GRANT SENSITIVITY ANALYSIS *** ###
 
 columns = ['strategic_only','double_trigger','cashflow_only']
-column_labels = ['Strategic only','Double-trigger','Cashflow only']
+column_labels = ['Collateral constrained only','Constrained by both','Income constrained only']
 colors = ['C3','C4','C0']
 
 n_replicates = len(default_df['replicate'].unique())
@@ -3017,7 +3029,7 @@ ax.set_xticklabels(grant_labels)
 ax.legend()
 
 ax.set_xlabel('Home repair grant amount, USD')
-ax.set_ylabel('Number of mortgage borrowers\nat risk of flood-related default')
+ax.set_ylabel('Number of mortgage borrowers facing\nflood-related credit constraints')
 
 fig.tight_layout()
 
@@ -3027,11 +3039,216 @@ fig.savefig(outname,dpi=400)
 fig.show()
 
 
-total_arr = NS_arr+ND_arr+NC_arr
-reduction_arr = 100*(total_arr - total_arr[0])/total_arr[0]
-for i in range(len(reduction_arr)):
-    print(grant_amounts[i],np.round(reduction_arr[i]))
+### *** SOBOL SENSITIVITY ANALYSIS *** ###
 
 
+sobol_dir = os.path.join(pwd,'sobol_indices')
+
+sobol_df = pd.read_parquet(os.path.join(sobol_dir,'sobol_indices_concatenated.parquet'))
+agg_df = pd.read_parquet(os.path.join(sobol_dir,'sobol_indices_aggregated.parquet'))
+
+
+### *** FIGURE S21: WEIGHTED AVERAGE SOBOL INDICES *** ###
+
+agg_df['sobol_interaction'] = agg_df['sobol_total_order'] - agg_df['sobol_first_order']
+sort_order = {'annual_income':1,'damage_cost':2,'property_value':3}
+agg_df['sort_order'] = agg_df['input_name'].apply(lambda x: sort_order[x])
+
+input_labels = {'property_value':'Property value',
+                'annual_income':'Income',
+                'damage_cost':'Damage cost'}
+
+output_labels = {'strategic_default':'Collateral constrained (ACLTV > 100%)',
+                 'cashflow_default':'Income constrained (ADTI > 45%)',
+                 'double_trigger_default':'Constrained by both (ACLTV > 100% and ADTI > 45%)',
+                 'any_default':'Constrained by either (ACLTV > 100% or ADTI > 45%)'}
+
+fig,axes = plt.subplots(nrows=4,ncols=1,figsize=(6,7))
+
+lw = 1
+ft = 10
+
+c1 = 'firebrick'
+c2 = 'lightcoral'
+alpha = 1.0
+
+xlabel = 'Weighted average Sobol indices'
+xticks = np.arange(0,1+0.01,0.1)
+
+### *** STRATEGIC *** ###
+
+ax = axes[0]
+
+output_name = 'strategic_default'
+
+m = (agg_df['output_name']==output_name)
+
+input_names = agg_df[m].sort_values(by='sort_order')['input_name'].to_list()
+first_order_effects = agg_df[m].sort_values(by='sort_order')['sobol_first_order'].to_list()
+interaction_effects = agg_df[m].sort_values(by='sort_order')['sobol_interaction'].to_list()
+
+yticks = np.arange(len(input_names))
+yticklabels = [input_labels[x] for x in input_names]
+
+ax.barh(yticks,first_order_effects,color=c1,alpha=alpha,ec='k',lw=lw,label='First-order effect',zorder=10)
+ax.barh(yticks,interaction_effects,left=first_order_effects,color=c2,alpha=alpha,ec='k',lw=lw,label='Interaction effect',zorder=10)
+
+ax.set_xlim([0,1])
+ax.set_xticks(xticks)
+ax.set_xlabel(xlabel,fontsize=ft)
+
+ax.set_yticks(yticks)
+ax.set_yticklabels(yticklabels,fontsize=ft)
+
+ax.grid('on',axis='x',zorder=0)
+
+ax.set_title(output_labels[output_name],fontsize=ft,fontweight='bold')
+
+### *** CASHFLOW *** ###
+
+ax = axes[1]
+
+output_name = 'cashflow_default'
+
+m = (agg_df['output_name']==output_name)
+
+input_names = agg_df[m].sort_values(by='sort_order')['input_name'].to_list()
+first_order_effects = agg_df[m].sort_values(by='sort_order')['sobol_first_order'].to_list()
+interaction_effects = agg_df[m].sort_values(by='sort_order')['sobol_interaction'].to_list()
+
+yticks = np.arange(len(input_names))
+yticklabels = [input_labels[x] for x in input_names]
+
+ax.barh(yticks,first_order_effects,color=c1,alpha=alpha,ec='k',lw=lw,label='First-order effect',zorder=10)
+ax.barh(yticks,interaction_effects,left=first_order_effects,color=c2,alpha=alpha,ec='k',lw=lw,label='Interaction effect',zorder=10)
+
+ax.set_xlim([0,1])
+ax.set_xticks(xticks)
+ax.set_xlabel(xlabel,fontsize=ft)
+
+ax.set_yticks(yticks)
+ax.set_yticklabels(yticklabels,fontsize=ft)
+
+ax.grid('on',axis='x',zorder=0)
+
+ax.set_title(output_labels[output_name],fontsize=ft,fontweight='bold')
+
+### *** DOUBLE-TRIGGER *** ###
+
+ax = axes[2]
+
+output_name = 'double_trigger_default'
+
+m = (agg_df['output_name']==output_name)
+
+input_names = agg_df[m].sort_values(by='sort_order')['input_name'].to_list()
+first_order_effects = agg_df[m].sort_values(by='sort_order')['sobol_first_order'].to_list()
+interaction_effects = agg_df[m].sort_values(by='sort_order')['sobol_interaction'].to_list()
+
+yticks = np.arange(len(input_names))
+yticklabels = [input_labels[x] for x in input_names]
+
+ax.barh(yticks,first_order_effects,color=c1,alpha=alpha,ec='k',lw=lw,label='First-order effect',zorder=10)
+ax.barh(yticks,interaction_effects,left=first_order_effects,color=c2,alpha=alpha,ec='k',lw=lw,label='Interaction effect',zorder=10)
+
+ax.set_xlim([0,1])
+ax.set_xticks(xticks)
+ax.set_xlabel(xlabel,fontsize=ft)
+
+ax.set_yticks(yticks)
+ax.set_yticklabels(yticklabels,fontsize=ft)
+
+ax.grid('on',axis='x',zorder=0)
+
+ax.set_title(output_labels[output_name],fontsize=ft,fontweight='bold')
+
+### *** ANY DEFAULT *** ###
+
+ax = axes[3]
+
+output_name = 'any_default'
+
+m = (agg_df['output_name']==output_name)
+
+input_names = agg_df[m].sort_values(by='sort_order')['input_name'].to_list()
+first_order_effects = agg_df[m].sort_values(by='sort_order')['sobol_first_order'].to_list()
+interaction_effects = agg_df[m].sort_values(by='sort_order')['sobol_interaction'].to_list()
+
+yticks = np.arange(len(input_names))
+yticklabels = [input_labels[x] for x in input_names]
+
+ax.barh(yticks,first_order_effects,color=c1,alpha=alpha,ec='k',lw=lw,label='First-order effect',zorder=10)
+ax.barh(yticks,interaction_effects,left=first_order_effects,color=c2,alpha=alpha,ec='k',lw=lw,label='Interaction effect',zorder=10)
+
+ax.set_xlim([0,1])
+ax.set_xticks(xticks)
+ax.set_xlabel(xlabel,fontsize=ft)
+
+ax.set_yticks(yticks)
+ax.set_yticklabels(yticklabels,fontsize=ft)
+
+ax.grid('on',axis='x',zorder=0)
+
+ax.set_title(output_labels[output_name],fontsize=ft,fontweight='bold')
+
+ax.legend(fontsize=ft)
+
+### ADD LETTERING ###
+
+letters = ['(a)','(b)','(c)','(d)']
+
+for i,ax in enumerate(axes.flat):
+    ax.text(-0.1, 1.05, letters[i], transform=ax.transAxes, size=13, weight='bold')
+
+fig.tight_layout()
+
+outname = os.path.join(outfolder,'Figure_S21_weighted_average_sobol.png')
+fig.savefig(outname,dpi=400)
+
+
+### *** TABLE S7: PARAMETER IMPORTANCE RANKING *** ###
+
+sobol_df.sort_values(by=['replicate','loan_id','period','output_name','sobol_total_order'],ascending=[True,True,True,True,False],inplace=True)
+sobol_df['input_rank'] = sobol_df.groupby(['replicate','loan_id','period','replicate','output_name'])['sobol_total_order'].rank(method='first',ascending=False)
+
+outcomes = ['strategic_default','cashflow_default','double_trigger_default','any_default']
+ranks = [1,2,3]
+parameters = ['property_value', 'damage_cost', 'annual_income']
+
+outcome_list = []
+rank_list = []
+freq_list = []
+
+for outcome in outcomes:
+    for rank in ranks:
+
+        outcome_list.append(outcome)
+        rank_list.append(rank)
+        
+        m = (sobol_df['output_name'] == outcome)&(sobol_df['input_rank'] == rank)
+        val_counts = sobol_df[m]['input_name'].value_counts(normalize=True)
+
+        freq_row = []
+
+        for parameter in parameters:
+            try: 
+                freq_row.append(val_counts[parameter])
+            except:
+                freq_row.append(0)
+
+        freq_list.append(freq_row)
+
+freq_arr = np.array(freq_list)
+
+param_rank_df = pd.DataFrame(data={'outcome':outcome_list,'rank':rank_list})
+
+for i in range(len(parameters)):
+    param_rank_df[parameters[i]] = freq_arr[:,i]
+
+outname = os.path.join(outfolder,'sobol_parameter_ranking_frequency.csv')
+param_rank_df.to_csv(outname)
+param_rank_df
+
+print('### *** DONE *** ###',flush=True)
 
 
